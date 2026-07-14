@@ -1,5 +1,5 @@
 // app.js — UI + orchestration for Guess Whoo!
-import { CHARACTERS, CHAR_BY_ID, renderAvatar, TRAIT_LABELS } from './characters.js';
+import { CHARACTERS, CHAR_BY_ID, renderAvatar, TRAIT_LABELS, describeTraits } from './characters.js';
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
 
@@ -43,9 +43,29 @@ function confirmModal({ title, body, okText = 'Confirm', cancelText = 'Cancel' }
 }
 
 function charCardHTML(ch, idx, extraClass = '') {
-  return `<div class="char ${extraClass}" data-id="${ch.id}">
+  return `<div class="char ${extraClass}" data-id="${ch.id}" data-name="${ch.name}" data-traits="${describeTraits(ch)}">
     ${renderAvatar(ch, idx)}<span class="cname">${ch.name}</span>
   </div>`;
+}
+
+// Floating tooltip that shows a character's traits while hovering any card.
+function initTooltip() {
+  const tip = $('#tooltip');
+  document.addEventListener('mousemove', (e) => {
+    const el = e.target.closest('[data-traits]');
+    if (!el) { tip.classList.add('hidden'); return; }
+    tip.innerHTML = `<b>${el.dataset.name || ''}</b>${el.dataset.name ? '<br>' : ''}${el.dataset.traits}`;
+    tip.classList.remove('hidden');
+    const pad = 16;
+    const r = tip.getBoundingClientRect();
+    let left = e.clientX + pad, top = e.clientY + pad;
+    if (left + r.width > window.innerWidth - 8) left = e.clientX - r.width - pad;
+    if (top + r.height > window.innerHeight - 8) top = e.clientY - r.height - pad;
+    tip.style.left = Math.max(8, left) + 'px';
+    tip.style.top = Math.max(8, top) + 'px';
+  }, { passive: true });
+  // Hide when the pointer leaves the window entirely.
+  document.addEventListener('mouseleave', () => tip.classList.add('hidden'));
 }
 
 /* --------------------------- game controller ------------------------ */
@@ -360,7 +380,9 @@ function renderPlay(s) {
   // pass-and-play the opponent has already looked away for your turn).
   const mine = CHAR_BY_ID[s.mySecret];
   $('#my-secret').innerHTML = mine
-    ? `${renderAvatar(mine, mine.id)}<span class="ms-name">${mine.name}</span>`
+    ? `<div class="ms-card" data-name="${mine.name}" data-traits="${describeTraits(mine)}">
+         ${renderAvatar(mine, mine.id)}<span class="ms-name">${mine.name}</span>
+       </div>`
     : '';
 
   // Board of the opponent's characters (my deduction surface).
@@ -396,8 +418,8 @@ function updateControls(s) {
 
   if (s.turnMode === 'guess') {
     guessBtn.disabled = false; guessBtn.textContent = '✖ Cancel guess';
-    endBtn.disabled = true;
-    banner.textContent = '🎯 Guess mode — tap the character you think is your rival\'s secret.';
+    endBtn.disabled = false;   // you can still end your turn without guessing
+    banner.textContent = '🎯 Guess mode — tap your rival\'s secret, or End Turn to keep deducing.';
     banner.className = 'mode-banner guess';
   } else if (s.turnMode === 'disable') {
     guessBtn.disabled = true; guessBtn.textContent = '🚫 Guessing locked';
@@ -472,7 +494,7 @@ function initPlayControls() {
   $('#btn-endturn').onclick = () => {
     const e = activeEngine; const s = e.state;
     if (s.turn !== 'me' || s.pendingGuess) return;
-    if (s.turnMode === 'guess') { toast('Finish or cancel your guess first.'); return; }
+    if (s.turnMode === 'guess') e.cancelGuess();   // back out of an un-made guess, then pass
     const ended = e.endTurn();
     if (!ended) return;
     if (G.mode === 'local') {
@@ -568,3 +590,4 @@ initHome();
 initSetupControls();
 initPlayControls();
 initOverControls();
+initTooltip();
