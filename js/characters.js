@@ -285,7 +285,8 @@ export const CHARACTERS = [
   { id: 30, name: 'Pip',     skin: 'light', hair: 'brown',  style: 'short',  eye: 'brown', glasses: 'none',   hat: 'party',  beard: 'none',     acc: 'none',     shirt: 'yellow' },
 ];
 
-// Human-readable labels for the trait legend shown during play.
+// Human-readable labels for every trait category + value. Drives the hover
+// tooltip and the in-play filter rail. Keys match the character property names.
 export const TRAIT_LABELS = {
   hair:    { name: 'Hair colour', values: { black: 'Black', brown: 'Brown', blonde: 'Blonde', red: 'Red', gray: 'Gray', blue: 'Blue', pink: 'Pink', green: 'Green' } },
   style:   { name: 'Hair style',  values: { bald: 'Bald', short: 'Short', long: 'Long', curly: 'Curly', spiky: 'Spiky', bun: 'Bun', mohawk: 'Mohawk', afro: 'Afro' } },
@@ -300,8 +301,7 @@ export const TRAIT_LABELS = {
 export const CHAR_BY_ID = Object.fromEntries(CHARACTERS.map((c) => [c.id, c]));
 
 // A section-by-section breakdown of a character's traits, for hover tooltips.
-// Every category is included (with its value, even "None") so it mirrors the
-// "Traits to ask about" legend.
+// Every category is included (with its value, even "None").
 export function traitRows(ch) {
   const T = TRAIT_LABELS;
   return [
