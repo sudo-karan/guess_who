@@ -276,12 +276,18 @@ body {
 
 /* --------------------------- trait tooltip -------------------------- */
 .tooltip {
-  position: fixed; z-index: 70; pointer-events: none;
-  background: var(--ink); color: #fff; padding: 9px 13px; border-radius: 10px;
-  font-size: 0.85rem; font-weight: 600; max-width: 230px; line-height: 1.4;
+  position: fixed; z-index: 70; pointer-events: none; text-align: left;
+  background: var(--ink); color: #fff; padding: 10px 13px; border-radius: 12px;
+  font-size: 0.82rem; line-height: 1.35; min-width: 190px; max-width: 250px;
   box-shadow: var(--shadow); animation: fade 0.12s ease;
 }
-.tooltip b { color: var(--yellow); }
+.tt-name {
+  font-weight: 800; color: var(--yellow); font-size: 0.98rem;
+  margin-bottom: 6px; padding-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.18);
+}
+.tt-row { display: flex; justify-content: space-between; gap: 14px; padding: 1.5px 0; }
+.tt-label { opacity: 0.72; }
+.tt-val { font-weight: 700; text-align: right; }
 
 /* make the secret card feel hoverable */
 .ms-card { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: help; }

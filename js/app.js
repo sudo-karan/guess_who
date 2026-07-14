@@ -1,5 +1,5 @@
 // app.js — UI + orchestration for Guess Whoo!
-import { CHARACTERS, CHAR_BY_ID, renderAvatar, TRAIT_LABELS, describeTraits } from './characters.js';
+import { CHARACTERS, CHAR_BY_ID, renderAvatar, TRAIT_LABELS, traitRows } from './characters.js';
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
 
@@ -43,18 +43,27 @@ function confirmModal({ title, body, okText = 'Confirm', cancelText = 'Cancel' }
 }
 
 function charCardHTML(ch, idx, extraClass = '') {
-  return `<div class="char ${extraClass}" data-id="${ch.id}" data-name="${ch.name}" data-traits="${describeTraits(ch)}">
+  return `<div class="char ${extraClass}" data-id="${ch.id}">
     ${renderAvatar(ch, idx)}<span class="cname">${ch.name}</span>
   </div>`;
 }
 
-// Floating tooltip that shows a character's traits while hovering any card.
+// Build the section-wise tooltip markup for a character.
+function tooltipHTML(ch) {
+  const rows = traitRows(ch).map((r) =>
+    `<div class="tt-row"><span class="tt-label">${r.label}</span><span class="tt-val">${r.value}</span></div>`
+  ).join('');
+  return `<div class="tt-name">${ch.name}</div>${rows}`;
+}
+
+// Floating tooltip that shows a character's full trait breakdown on hover.
 function initTooltip() {
   const tip = $('#tooltip');
   document.addEventListener('mousemove', (e) => {
-    const el = e.target.closest('[data-traits]');
-    if (!el) { tip.classList.add('hidden'); return; }
-    tip.innerHTML = `<b>${el.dataset.name || ''}</b>${el.dataset.name ? '<br>' : ''}${el.dataset.traits}`;
+    const el = e.target.closest('.char, .ms-card, .reveal-card');
+    const ch = el && CHAR_BY_ID[Number(el.dataset.id)];
+    if (!ch) { tip.classList.add('hidden'); return; }
+    tip.innerHTML = tooltipHTML(ch);
     tip.classList.remove('hidden');
     const pad = 16;
     const r = tip.getBoundingClientRect();
@@ -380,7 +389,7 @@ function renderPlay(s) {
   // pass-and-play the opponent has already looked away for your turn).
   const mine = CHAR_BY_ID[s.mySecret];
   $('#my-secret').innerHTML = mine
-    ? `<div class="ms-card" data-name="${mine.name}" data-traits="${describeTraits(mine)}">
+    ? `<div class="ms-card" data-id="${mine.id}">
          ${renderAvatar(mine, mine.id)}<span class="ms-name">${mine.name}</span>
        </div>`
     : '';
@@ -551,7 +560,7 @@ function showOver(s) {
   showScreen('over');
 }
 function revealCardHTML(label, ch) {
-  return `<div class="reveal-card"><span class="rc-label">${label}</span>
+  return `<div class="reveal-card" data-id="${ch.id}"><span class="rc-label">${label}</span>
     ${renderAvatar(ch, ch.id)}<span class="rc-name">${ch.name}</span></div>`;
 }
 
