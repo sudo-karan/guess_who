@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Guess Whoo! — a colourful two-player guessing game</title>
+  <meta name="description" content="A colourful, two-player Guess Who game. Play online with a room code or pass-and-play on one device." />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%237c5cff'/%3E%3Ctext y='72' x='50' font-size='60' text-anchor='middle'%3E%3F%3C/text%3E%3C/svg%3E" />
+  <!-- PeerJS (vendored) powers WebRTC online play via a shared room code.
+       If it can't reach the signalling server, local pass-and-play still works. -->
+  <script src="js/vendor/peerjs.min.js"></script>
+</head>
+<body>
+  <div class="app">
+
+    <!-- ================= HOME / LOBBY ================= -->
+    <section id="screen-home" class="screen active">
+      <header class="hero">
+        <h1 class="logo">Guess <span>Whoo!</span></h1>
+        <p class="tagline">30 characters. 20 on your board. 1 secret. Out-deduce your rival.</p>
+      </header>
+
+      <div class="mode-cards">
+        <button class="mode-card" id="btn-online">
+          <span class="mode-emoji">🌍</span>
+          <span class="mode-title">Play Online</span>
+          <span class="mode-sub">Share a room code with a friend</span>
+        </button>
+        <button class="mode-card" id="btn-local">
+          <span class="mode-emoji">🛋️</span>
+          <span class="mode-title">Pass &amp; Play</span>
+          <span class="mode-sub">Two players, one device</span>
+        </button>
+        <button class="mode-card" id="btn-how">
+          <span class="mode-emoji">📖</span>
+          <span class="mode-title">How to Play</span>
+          <span class="mode-sub">Learn the rules in 30 seconds</span>
+        </button>
+      </div>
+
+      <!-- Online sub-panel -->
+      <div id="online-panel" class="panel hidden">
+        <div class="name-row">
+          <label>Your name <input id="online-name" maxlength="14" placeholder="e.g. Alex" /></label>
+        </div>
+        <div class="online-actions">
+          <div class="online-col">
+            <h3>Host a room</h3>
+            <button class="btn primary" id="btn-host">Create room</button>
+            <div id="host-code" class="code-box hidden">
+              <span class="code-label">Room code</span>
+              <span class="code" id="code-value">----</span>
+              <button class="btn tiny" id="btn-copy">Copy</button>
+            </div>
+          </div>
+          <div class="online-divider"><span>or</span></div>
+          <div class="online-col">
+            <h3>Join a room</h3>
+            <input id="join-code" class="code-input" maxlength="4" placeholder="CODE" autocomplete="off" />
+            <button class="btn primary" id="btn-join">Join</button>
+          </div>
+        </div>
+        <p id="net-status" class="net-status"></p>
+      </div>
+
+      <!-- How-to panel -->
+      <div id="how-panel" class="panel hidden">
+        <h3>How to play</h3>
+        <ol class="rules">
+          <li><b>Build your board.</b> Pick <b>20</b> of the 30 characters. This is the board your opponent will study.</li>
+          <li><b>Choose your secret.</b> Pick <b>1</b> of your 20 to be your hidden character.</li>
+          <li><b>Take turns.</b> On your turn, ask a yes/no question about a trait, then <b>either</b>:</li>
+          <ul>
+            <li>🚫 <b>Disable</b> the characters that don't fit — but once you start disabling you <b>can't guess</b> this turn.</li>
+            <li>🎯 <b>Guess</b> the opponent's secret. Right = you win. Wrong = you lose!</li>
+          </ul>
+          <li><b>Watch the counts.</b> After each turn you can see how many cards your opponent has left <b>open</b> vs <b>crossed out</b>.</li>
+          <li>Hit <b>End Turn</b> to pass play. First to correctly guess wins. 🏆</li>
+        </ol>
+        <button class="btn" id="btn-how-close">Got it</button>
+      </div>
+    </section>
+
+    <!-- ================= SETUP ================= -->
+    <section id="screen-setup" class="screen">
+      <header class="bar">
+        <div class="bar-title"><span id="setup-player">Player 1</span> · Build your board</div>
+        <div class="bar-step" id="setup-step">Step 1 of 2 — pick 20 characters</div>
+      </header>
+      <div class="setup-hint" id="setup-hint">
+        Tap characters to add them to your board. <b><span id="pick-count">0</span>/20</b> chosen.
+      </div>
+      <div id="setup-grid" class="grid setup-grid"></div>
+      <div class="setup-footer">
+        <button class="btn ghost" id="setup-clear">Clear</button>
+        <button class="btn ghost" id="setup-random">Random 20</button>
+        <button class="btn primary" id="setup-next" disabled>Next: pick your secret →</button>
+        <button class="btn primary hidden" id="setup-confirm">Lock in secret ✓</button>
+      </div>
+    </section>
+
+    <!-- ================= PASS DEVICE (local) ================= -->
+    <section id="screen-pass" class="screen">
+      <div class="pass-card">
+        <span class="pass-emoji">🤫</span>
+        <h2 id="pass-title">Pass the device</h2>
+        <p id="pass-sub">Hand the device to the next player. No peeking!</p>
+        <button class="btn primary big" id="pass-ready">I'm ready</button>
+      </div>
+    </section>
+
+    <!-- ================= PLAY ================= -->
+    <section id="screen-play" class="screen">
+      <header class="bar play-bar">
+        <div class="turn-pill" id="turn-pill">Your turn</div>
+        <div class="scoreboard">
+          <div class="score you">
+            <span class="score-name" id="score-you-name">You</span>
+            <span class="score-nums"><b id="you-open">20</b> open · <b id="you-closed">0</b> out</span>
+          </div>
+          <div class="score opp">
+            <span class="score-name" id="score-opp-name">Rival</span>
+            <span class="score-nums"><b id="opp-open">20</b> open · <b id="opp-closed">0</b> out</span>
+          </div>
+        </div>
+      </header>
+
+      <div id="mode-banner" class="mode-banner hidden"></div>
+
+      <div class="play-body">
+        <div class="board-wrap">
+          <div id="play-grid" class="grid play-grid"></div>
+        </div>
+        <aside class="side">
+          <div class="side-block">
+            <h4>Traits to ask about</h4>
+            <div id="legend" class="legend"></div>
+          </div>
+          <div class="side-block chat-block">
+            <h4>Ask a question 💬</h4>
+            <div id="chat-log" class="chat-log"></div>
+            <form id="chat-form" class="chat-form">
+              <input id="chat-input" maxlength="200" placeholder="Do they wear glasses?" autocomplete="off" />
+              <button class="btn tiny primary" type="submit">Send</button>
+            </form>
+          </div>
+        </aside>
+      </div>
+
+      <footer class="controls">
+        <button class="btn danger" id="btn-guess">🎯 Make a Guess</button>
+        <button class="btn primary" id="btn-endturn">End Turn →</button>
+      </footer>
+    </section>
+
+    <!-- ================= GAME OVER ================= -->
+    <section id="screen-over" class="screen">
+      <div class="over-card">
+        <span class="over-emoji" id="over-emoji">🏆</span>
+        <h2 id="over-title">You win!</h2>
+        <p id="over-sub"></p>
+        <div class="reveal-row" id="reveal-row"></div>
+        <div class="over-actions">
+          <button class="btn primary" id="btn-rematch">Rematch</button>
+          <button class="btn ghost" id="btn-home">Home</button>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ================= CONFIRM MODAL ================= -->
+  <div id="modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3 id="modal-title">Are you sure?</h3>
+      <p id="modal-body"></p>
+      <div class="modal-actions">
+        <button class="btn ghost" id="modal-cancel">Cancel</button>
+        <button class="btn primary" id="modal-ok">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
