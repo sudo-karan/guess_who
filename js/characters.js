@@ -250,40 +250,52 @@ export function renderAvatar(ch, index = 0) {
 }
 
 /* ------------------------------ roster ------------------------------ */
-// Each character: unique visual combination of askable traits.
+// A fixed cast of 30 names. Their looks are randomised fresh every game, so no
+// two matches share the same faces. Both players use the identical roster: the
+// host generates it once and sends it to the guest.
 
-export const CHARACTERS = [
-  { id: 1,  name: 'Bella',   skin: 'light', hair: 'blonde', style: 'long',   eye: 'blue',  glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'earrings', shirt: 'pink' },
-  { id: 2,  name: 'Marcus',  skin: 'brown', hair: 'black',  style: 'short',  eye: 'brown', glasses: 'square', hat: 'none',   beard: 'beard',    acc: 'none',     shirt: 'blue' },
-  { id: 3,  name: 'Zara',    skin: 'tan',   hair: 'pink',   style: 'bun',    eye: 'green', glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'necklace', shirt: 'purple' },
-  { id: 4,  name: 'Leo',     skin: 'light', hair: 'brown',  style: 'spiky',  eye: 'brown', glasses: 'none',   hat: 'cap',    beard: 'none',     acc: 'none',     shirt: 'green' },
-  { id: 5,  name: 'Nina',    skin: 'deep',  hair: 'black',  style: 'curly',  eye: 'brown', glasses: 'round',  hat: 'none',   beard: 'none',     acc: 'earrings', shirt: 'teal' },
-  { id: 6,  name: 'Oscar',   skin: 'tan',   hair: 'red',    style: 'short',  eye: 'blue',  glasses: 'none',   hat: 'none',   beard: 'mustache', acc: 'bowtie',   shirt: 'yellow' },
-  { id: 7,  name: 'Priya',   skin: 'brown', hair: 'black',  style: 'long',   eye: 'brown', glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'scarf',    shirt: 'orange' },
-  { id: 8,  name: 'Finn',    skin: 'light', hair: 'blonde', style: 'mohawk', eye: 'green', glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'none',     shirt: 'red' },
-  { id: 9,  name: 'Ruby',    skin: 'light', hair: 'red',    style: 'curly',  eye: 'green', glasses: 'round',  hat: 'none',   beard: 'none',     acc: 'freckles', shirt: 'pink' },
-  { id: 10, name: 'Kwame',   skin: 'deep',  hair: 'black',  style: 'bald',   eye: 'brown', glasses: 'none',   hat: 'none',   beard: 'beard',    acc: 'none',     shirt: 'blue' },
-  { id: 11, name: 'Ivy',     skin: 'tan',   hair: 'green',  style: 'long',   eye: 'blue',  glasses: 'square', hat: 'none',   beard: 'none',     acc: 'necklace', shirt: 'green' },
-  { id: 12, name: 'Sam',     skin: 'light', hair: 'brown',  style: 'short',  eye: 'brown', glasses: 'none',   hat: 'beanie', beard: 'goatee',   acc: 'none',     shirt: 'purple' },
-  { id: 13, name: 'Tara',    skin: 'brown', hair: 'black',  style: 'afro',   eye: 'brown', glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'earrings', shirt: 'yellow' },
-  { id: 14, name: 'Hugo',    skin: 'tan',   hair: 'gray',   style: 'short',  eye: 'blue',  glasses: 'round',  hat: 'none',   beard: 'mustache', acc: 'bowtie',   shirt: 'teal' },
-  { id: 15, name: 'Lola',    skin: 'light', hair: 'pink',   style: 'long',   eye: 'green', glasses: 'sun',    hat: 'none',   beard: 'none',     acc: 'none',     shirt: 'pink' },
-  { id: 16, name: 'Deshawn', skin: 'deep',  hair: 'black',  style: 'spiky',  eye: 'brown', glasses: 'none',   hat: 'cap',    beard: 'none',     acc: 'none',     shirt: 'orange' },
-  { id: 17, name: 'Mei',     skin: 'light', hair: 'black',  style: 'bun',    eye: 'brown', glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'necklace', shirt: 'red' },
-  { id: 18, name: 'Gus',     skin: 'tan',   hair: 'brown',  style: 'bald',   eye: 'green', glasses: 'square', hat: 'none',   beard: 'beard',    acc: 'none',     shirt: 'blue' },
-  { id: 19, name: 'Amara',   skin: 'brown', hair: 'blue',   style: 'curly',  eye: 'brown', glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'freckles', shirt: 'teal' },
-  { id: 20, name: 'Theo',    skin: 'light', hair: 'blonde', style: 'short',  eye: 'blue',  glasses: 'none',   hat: 'tophat', beard: 'mustache', acc: 'bowtie',   shirt: 'purple' },
-  { id: 21, name: 'Freya',   skin: 'light', hair: 'gray',   style: 'long',   eye: 'blue',  glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'scarf',    shirt: 'green' },
-  { id: 22, name: 'Jamal',   skin: 'deep',  hair: 'black',  style: 'short',  eye: 'brown', glasses: 'sun',    hat: 'none',   beard: 'goatee',   acc: 'none',     shirt: 'yellow' },
-  { id: 23, name: 'Cleo',    skin: 'tan',   hair: 'pink',   style: 'afro',   eye: 'green', glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'earrings', shirt: 'pink' },
-  { id: 24, name: 'Rex',     skin: 'light', hair: 'red',    style: 'spiky',  eye: 'brown', glasses: 'none',   hat: 'none',   beard: 'beard',    acc: 'none',     shirt: 'red' },
-  { id: 25, name: 'Suki',    skin: 'light', hair: 'blue',   style: 'bun',    eye: 'brown', glasses: 'round',  hat: 'none',   beard: 'none',     acc: 'necklace', shirt: 'teal' },
-  { id: 26, name: 'Bruno',   skin: 'tan',   hair: 'brown',  style: 'curly',  eye: 'brown', glasses: 'none',   hat: 'beanie', beard: 'mustache', acc: 'none',     shirt: 'orange' },
-  { id: 27, name: 'Elsa',    skin: 'light', hair: 'blonde', style: 'long',   eye: 'blue',  glasses: 'none',   hat: 'crown',  beard: 'none',     acc: 'none',     shirt: 'blue' },
-  { id: 28, name: 'Nico',    skin: 'brown', hair: 'black',  style: 'short',  eye: 'green', glasses: 'square', hat: 'none',   beard: 'none',     acc: 'bowtie',   shirt: 'purple' },
-  { id: 29, name: 'Willow',  skin: 'light', hair: 'green',  style: 'long',   eye: 'green', glasses: 'none',   hat: 'none',   beard: 'none',     acc: 'freckles', shirt: 'green' },
-  { id: 30, name: 'Pip',     skin: 'light', hair: 'brown',  style: 'short',  eye: 'brown', glasses: 'none',   hat: 'party',  beard: 'none',     acc: 'none',     shirt: 'yellow' },
+const RAW_NAMES = [
+  'shilpa', 'karan', 'asif', 'ritu', 'rekha', 'mohit', 'pradeep', 'Jyoti', 'manoj', 'arabind',
+  'mansi', 'brajesh', 'Usha', 'alka', 'prajanya', 'nidhi', 'ayush', 'jamal', 'dilip', 'ruchi',
+  'Anjali', 'Richie', 'jannat', 'aafi', 'roodra', 'harshit', 'benisha', 'bhuvik', 'diya', 'baati',
 ];
+export const NAMES = RAW_NAMES.map((n) => n.charAt(0).toUpperCase() + n.slice(1));
+
+// Trait pools. "none" is repeated for glasses/hat/beard/acc so most faces stay
+// clean and the standout features feel special — like the classic board.
+const POOL = {
+  skin:    ['light', 'tan', 'brown', 'deep'],
+  hair:    ['black', 'brown', 'blonde', 'red', 'gray', 'blue', 'pink', 'green'],
+  style:   ['bald', 'short', 'long', 'curly', 'spiky', 'bun', 'mohawk', 'afro'],
+  eye:     ['brown', 'blue', 'green'],
+  glasses: ['none', 'none', 'none', 'none', 'round', 'square', 'sun'],
+  hat:     ['none', 'none', 'none', 'none', 'cap', 'beanie', 'tophat', 'crown', 'party'],
+  beard:   ['none', 'none', 'none', 'none', 'none', 'mustache', 'beard', 'goatee'],
+  acc:     ['none', 'none', 'earrings', 'bowtie', 'necklace', 'scarf', 'freckles'],
+  shirt:   ['red', 'blue', 'green', 'purple', 'orange', 'teal', 'pink', 'yellow'],
+};
+
+// Generate a fresh, random roster. Each character is a unique trait combination
+// so no two look identical (which would make deduction impossible).
+export function generateRoster() {
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const seen = new Set();
+  return NAMES.map((name, i) => {
+    let ch, key, tries = 0;
+    do {
+      ch = {
+        id: i + 1, name,
+        skin: pick(POOL.skin), hair: pick(POOL.hair), style: pick(POOL.style), eye: pick(POOL.eye),
+        glasses: pick(POOL.glasses), hat: pick(POOL.hat), beard: pick(POOL.beard),
+        acc: pick(POOL.acc), shirt: pick(POOL.shirt),
+      };
+      key = [ch.skin, ch.hair, ch.style, ch.eye, ch.glasses, ch.hat, ch.beard, ch.acc].join('|');
+      tries++;
+    } while (seen.has(key) && tries < 40);
+    seen.add(key);
+    return ch;
+  });
+}
 
 // Human-readable labels for every trait category + value. Drives the hover
 // tooltip and the in-play filter rail. Keys match the character property names.
@@ -297,8 +309,6 @@ export const TRAIT_LABELS = {
   beard:   { name: 'Facial hair', values: { none: 'None', mustache: 'Mustache', beard: 'Beard', goatee: 'Goatee' } },
   acc:     { name: 'Accessory',   values: { none: 'None', earrings: 'Earrings', bowtie: 'Bow tie', necklace: 'Necklace', scarf: 'Scarf', freckles: 'Freckles' } },
 };
-
-export const CHAR_BY_ID = Object.fromEntries(CHARACTERS.map((c) => [c.id, c]));
 
 // A section-by-section breakdown of a character's traits, for hover tooltips.
 // Every category is included (with its value, even "None").

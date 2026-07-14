@@ -1,7 +1,16 @@
 // app.js — UI + orchestration for Guess Whoo!
-import { CHARACTERS, CHAR_BY_ID, renderAvatar, TRAIT_LABELS, traitRows } from './characters.js';
+import { generateRoster, renderAvatar, TRAIT_LABELS, traitRows } from './characters.js';
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
+
+// The roster (name → randomised look) for the current match. Regenerated every
+// game; in online play the host generates it and sends it so both sides match.
+let ROSTER = [];
+let CHAR_BY_ID = {};
+function setRoster(arr) {
+  ROSTER = arr || [];
+  CHAR_BY_ID = Object.fromEntries(ROSTER.map((c) => [c.id, c]));
+}
 
 /* ------------------------------ helpers ----------------------------- */
 const $ = (sel) => document.querySelector(sel);
@@ -127,13 +136,35 @@ function makeOnlineEngine(isHost) {
   return engine;
 }
 
+// Intercept the app-level `roster` message; everything else is an engine message.
+function onOnlineMessage(m, engine) {
+  if (m && m.type === 'roster') {
+    setRoster(m.roster);
+    // The guest opens the board builder once it has received the roster (the
+    // host already did after generating it). During a rematch the engine reset
+    // drives this instead, so only fire on a fresh, pre-setup engine.
+    if (engine.state.phase === 'setup' && !engine.state.myReady
+        && !screens.setup.classList.contains('active')) {
+      enterSetup(engine);
+    }
+    return;
+  }
+  engine.handleMessage(m);
+}
+
 function hostOnline() {
   G.mode = 'online';
   G.channel = createOnlineChannel();
   const engine = makeOnlineEngine(true);
-  G.channel.onData((m) => engine.handleMessage(m));
+  G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
-  G.channel.onOpen(() => { setNetStatus('Opponent connected!', 'ok'); enterSetup(engine); });
+  G.channel.onOpen(() => {
+    setNetStatus('Opponent connected!', 'ok');
+    const roster = generateRoster();          // host is authoritative for the cast
+    setRoster(roster);
+    G.channel.send({ type: 'roster', roster });
+    enterSetup(engine);
+  });
   G.channel.onError(handleNetError);
   G.channel.host((code) => {
     $('#host-code').classList.remove('hidden');
@@ -147,9 +178,9 @@ function joinOnline() {
   G.mode = 'online';
   G.channel = createOnlineChannel();
   const engine = makeOnlineEngine(false);
-  G.channel.onData((m) => engine.handleMessage(m));
+  G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
-  G.channel.onOpen(() => { setNetStatus('Connected!', 'ok'); enterSetup(engine); });
+  G.channel.onOpen(() => setNetStatus('Connected! Dealing the characters…', 'ok'));
   G.channel.onError(handleNetError);
   G.channel.join(code);
 }
@@ -200,6 +231,7 @@ function startLocal() {
   if (G.channel) { G.channel.close(); G.channel = null; }
   G.mode = 'local';
   activeEngine = null;
+  setRoster(generateRoster());     // fresh random cast for this match
   const pair = createLocalPair();
   const A = createEngine({ isHost: true, myName: 'Player 1' });
   const B = createEngine({ isHost: false, myName: 'Player 2' });
@@ -256,7 +288,7 @@ function enterSetup(engine, onDone) {
   setupCtx = { engine, onDone, picked: new Set(), secret: null, step: 1 };
   $('#setup-player').textContent = engine.state.myName;
   $('#setup-step').textContent = 'Step 1 of 2 — pick 20 characters';
-  $('#setup-grid').innerHTML = CHARACTERS.map((c, i) => charCardHTML(c, i)).join('');
+  $('#setup-grid').innerHTML = ROSTER.map((c, i) => charCardHTML(c, i)).join('');
   $('#setup-confirm').classList.add('hidden');
   $('#setup-next').classList.remove('hidden');
   $('#setup-clear').classList.remove('hidden');
@@ -311,7 +343,7 @@ function initSetupControls() {
   });
   $('#setup-clear').onclick = () => { setupCtx.picked.clear(); setupCtx.secret = null; updateSetupUI(); };
   $('#setup-random').onclick = () => {
-    const ids = CHARACTERS.map((c) => c.id);
+    const ids = ROSTER.map((c) => c.id);
     for (let i = ids.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [ids[i], ids[j]] = [ids[j], ids[i]]; }
     setupCtx.picked = new Set(ids.slice(0, BOARD_SIZE));
     setupCtx.secret = null;
@@ -604,12 +636,16 @@ function initOverControls() {
   $('#btn-rematch').onclick = () => {
     $('#btn-rematch').disabled = true;   // debounce: one rematch request per game-over
     if (G.mode === 'online') {
-      // Resets both engines to 'setup'; routeOnline re-opens the board builder
-      // for both players.
+      // Deal a fresh cast, share it, then reset both engines to 'setup';
+      // routeOnline re-opens the board builder for both players.
+      const roster = generateRoster();
+      setRoster(roster);
+      G.channel.send({ type: 'roster', roster });
       activeEngine.requestRematch();
     } else {
-      // Local: reset both engines and run the hot-seat setup again.
+      // Local: fresh cast, reset both engines, run the hot-seat setup again.
       G.A.requestRematch();               // resets A and notifies B (which resets too)
+      setRoster(generateRoster());
       showPass({
         title: 'Rematch! Player 1 first 🙈', sub: 'Build a new board while Player 2 looks away.',
         buttonText: "I'm Player 1",
