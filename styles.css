@@ -31,7 +31,9 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-.app { max-width: 1080px; margin: 0 auto; padding: 18px 16px 40px; }
+.app { max-width: 1600px; margin: 0 auto; padding: 18px 24px 40px; }
+/* Lobby / setup / results read better as a centred column, not full-bleed. */
+#screen-home, #screen-setup, #screen-over, #screen-pass { max-width: 1180px; margin: 0 auto; }
 
 /* ------------------------------ screens ----------------------------- */
 .screen { display: none; animation: pop 0.35s ease; }
@@ -211,7 +213,7 @@ body {
 .mode-banner.disable { background: #fff0f4; color: var(--pink); border: 2px dashed var(--pink); }
 .mode-banner.guess { background: #fff5f5; color: var(--red); border: 2px dashed var(--red); }
 
-.play-body { display: grid; grid-template-columns: 208px 1fr 248px; gap: 16px; align-items: start; }
+.play-body { display: grid; grid-template-columns: 250px 1fr 280px; gap: 18px; align-items: start; }
 .board-wrap { background: var(--card); border-radius: var(--radius); padding: 14px; box-shadow: var(--shadow-sm); }
 
 .side { display: flex; flex-direction: column; gap: 14px; }
@@ -227,6 +229,17 @@ body {
 .filter-block { position: sticky; top: 10px; max-height: calc(100vh - 24px); overflow-y: auto; }
 .filter-hint { font-size: 0.76rem; color: var(--ink-soft); margin: 0 0 12px; line-height: 1.35; }
 .filter-panel { display: flex; flex-direction: column; gap: 12px; }
+.filter-tally {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: var(--paper); border: 2px solid var(--teal); border-radius: 12px;
+  padding: 6px 10px; font-size: 0.82rem; font-weight: 700;
+}
+.filter-tally b { color: var(--teal); font-size: 1rem; }
+.filter-clear {
+  font-family: inherit; font-size: 0.74rem; font-weight: 800; cursor: pointer;
+  border: none; background: var(--ink); color: #fff; border-radius: 999px; padding: 4px 10px;
+}
+.filter-clear:hover { filter: brightness(1.15); }
 .fs-title {
   font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.6px;
   color: var(--ink-soft); font-weight: 800; margin-bottom: 6px;
@@ -264,10 +277,13 @@ body {
 .chat-form input { flex: 1; min-width: 0; padding: 8px 10px; border: 2px solid var(--line); border-radius: 10px; font-family: inherit; }
 
 .controls {
-  display: flex; gap: 12px; justify-content: center; margin-top: 16px;
-  position: sticky; bottom: 10px;
+  display: flex; gap: 12px; justify-content: center; align-items: center;
+  position: sticky; bottom: 0; z-index: 5; margin-top: 8px;
+  padding: 16px 0 10px;
+  /* fade the board out behind the buttons so they read as a footer, not an overlap */
+  background: linear-gradient(to bottom, rgba(251, 247, 255, 0), var(--paper) 55%);
 }
-.controls .btn { min-width: 180px; }
+.controls .btn { min-width: 190px; }
 
 /* ------------------------------- over ------------------------------- */
 .over-card h2 { color: var(--purple); }
