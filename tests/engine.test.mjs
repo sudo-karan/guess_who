@@ -135,6 +135,45 @@ test('rematch resets both engines to setup', () => {
   assert.equal(A.state.oppSecret, null);
 });
 
+test('second player to set up moves to waiting, not stuck on setup', () => {
+  const { A, B } = pair();
+  A.setupLocal({ board: first20, secret: 3 });
+  assert.equal(A.state.phase, 'waiting');   // host waits for guest
+  B.setupLocal({ board: first20, secret: 7 });
+  // both boards in -> host began -> both playing
+  assert.equal(A.state.phase, 'play');
+  assert.equal(B.state.phase, 'play');
+});
+
+test('a player cannot submit their board twice', () => {
+  const { A, B } = pair();
+  A.setupLocal({ board: first20, secret: 3 });
+  const again = A.setupLocal({ board: first20, secret: 5 });
+  assert.equal(again.ok, false);            // already committed
+  assert.equal(A.state.mySecret, 3);        // unchanged
+});
+
+test('rematch is ignored unless the receiver is on the game-over screen', () => {
+  const { A, B } = pair();
+  setupBoth(A, B, 3, 7);
+  // Mid-game, a stray rematch from B must not reset A.
+  B.requestRematch();
+  assert.equal(A.state.phase, 'play');
+  assert.equal(A.state.mySecret, 3);
+});
+
+test('rematch clears chat history', () => {
+  const { A, B } = pair();
+  setupBoth(A, B, 3, 7);
+  A.sendChat('do they wear glasses?');
+  assert.equal(A.state.chat.length, 1);
+  assert.equal(B.state.chat.length, 1);
+  A.beginGuess(); A.makeGuess(7);           // end the game
+  A.requestRematch();
+  assert.equal(A.state.chat.length, 0);
+  assert.equal(B.state.chat.length, 0);
+});
+
 test('a full multi-turn game plays through', () => {
   const { A, B } = pair();
   setupBoth(A, B, 3, 7);
