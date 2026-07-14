@@ -93,7 +93,18 @@ const G = {
   A: null, B: null,    // local engines
 };
 let activeEngine = null;   // engine the play/over UI currently reflects
-let activeFilter = null;   // { trait, value } currently highlighting the board (UI-only)
+// Highlight filters (UI-only). Multi-select: { traitKey: Set(values) }.
+// A card lights up when it matches EVERY active section (AND across sections),
+// matching ANY selected value within a section (OR within a section).
+let activeFilters = {};
+function anyFilter() { return Object.values(activeFilters).some((set) => set.size > 0); }
+function cardMatchesFilters(ch) {
+  for (const [trait, vals] of Object.entries(activeFilters)) {
+    if (vals.size && !vals.has(ch[trait])) return false;
+  }
+  return true;
+}
+function clearFilters() { activeFilters = {}; }
 
 /* ------------------------------- home ------------------------------- */
 function initHome() {
@@ -285,6 +296,7 @@ function beginLocalTurn(engine) {
 /* ------------------------------ setup ------------------------------- */
 let setupCtx = null;
 function enterSetup(engine, onDone) {
+  clearFilters();          // a new game (or rematch) starts with no highlight
   setupCtx = { engine, onDone, picked: new Set(), secret: null, step: 1 };
   $('#setup-player').textContent = engine.state.myName;
   $('#setup-step').textContent = 'Step 1 of 2 — pick 20 characters';
@@ -384,28 +396,40 @@ function showPass({ title, sub, buttonText, onReady }) {
 
 /* ------------------------------- play ------------------------------- */
 function ensurePlayView() {
-  activeFilter = null;     // start each turn with a clean, unfiltered view
   // Only switch (and scroll) on the first entry into the board — otherwise every
-  // state change would re-scroll the page to the top mid-game.
+  // state change would re-scroll the page to the top mid-game. (Filters persist
+  // across turns and are only reset for a new game, in enterSetup.)
   if (!screens.play.classList.contains('active')) showScreen('play');
 }
 
 // Build the left-hand filter rail from the deduction board. Each trait value
 // present on the board becomes a chip showing how many still-open cards have it;
-// values whose cards are all crossed out are shown disabled.
+// values whose cards are all crossed out are shown disabled. Multiple chips can
+// be selected at once.
 function renderFilters(s) {
   const panel = $('#filter-panel');
   const board = s.oppBoard || [];
   if (!board.length) { panel.innerHTML = ''; return; }
   const isOpen = (id) => s.deduction[id] !== false;
 
+  // Header: how many open cards match the current selection, plus a Clear.
+  let header = '';
+  if (anyFilter()) {
+    const matches = board.filter((id) => isOpen(id) && cardMatchesFilters(CHAR_BY_ID[id])).length;
+    header = `<div class="filter-tally">
+      <span><b>${matches}</b> match${matches === 1 ? '' : 'es'}</span>
+      <button class="filter-clear" data-clear="1">Clear all</button>
+    </div>`;
+  }
+
   const sections = Object.entries(TRAIT_LABELS).map(([key, meta]) => {
     // Only values that actually appear on this board, in canonical order.
     const present = Object.keys(meta.values).filter((val) => board.some((id) => CHAR_BY_ID[id][key] === val));
     if (!present.length) return '';
+    const sel = activeFilters[key];
     const chips = present.map((val) => {
       const count = board.filter((id) => CHAR_BY_ID[id][key] === val && isOpen(id)).length;
-      const active = activeFilter && activeFilter.trait === key && activeFilter.value === val;
+      const active = sel && sel.has(val);
       const off = count === 0;
       return `<button class="fchip${active ? ' active' : ''}${off ? ' off' : ''}"
         data-trait="${key}" data-value="${val}"${off ? ' disabled' : ''}>
@@ -413,7 +437,7 @@ function renderFilters(s) {
     }).join('');
     return `<div class="filter-sec"><div class="fs-title">${meta.name}</div><div class="fs-chips">${chips}</div></div>`;
   }).join('');
-  panel.innerHTML = sections;
+  panel.innerHTML = header + sections;
 }
 
 function renderPlay(s) {
@@ -442,23 +466,30 @@ function renderPlay(s) {
        </div>`
     : '';
 
-  // If the active filter's cards have all been crossed out, drop it.
-  if (activeFilter && !(s.oppBoard || []).some((id) =>
-      s.deduction[id] !== false && CHAR_BY_ID[id][activeFilter.trait] === activeFilter.value)) {
-    activeFilter = null;
+  // Drop only filter values whose last matching open card is gone — never on an
+  // unrelated card being crossed out. (This is why the highlight now persists
+  // while you disable cards.)
+  for (const trait of Object.keys(activeFilters)) {
+    for (const v of [...activeFilters[trait]]) {
+      const stillThere = (s.oppBoard || []).some((id) =>
+        s.deduction[id] !== false && CHAR_BY_ID[id][trait] === v);
+      if (!stillThere) activeFilters[trait].delete(v);
+    }
+    if (activeFilters[trait].size === 0) delete activeFilters[trait];
   }
 
   // Board of the opponent's characters (my deduction surface).
   const grid = $('#play-grid');
   const guessing = s.turnMode === 'guess' && myTurn;
-  grid.classList.toggle('filtering', !!activeFilter);
+  const filtering = anyFilter();
+  grid.classList.toggle('filtering', filtering);
   grid.innerHTML = (s.oppBoard || []).map((id, i) => {
     const ch = CHAR_BY_ID[id];
     const isClosed = s.deduction[id] === false;
     let extra = '';
     if (isClosed) extra += ' closed';
     if (guessing && !isClosed) extra += ' guessable';
-    if (activeFilter && !isClosed && ch[activeFilter.trait] === activeFilter.value) extra += ' lit';
+    if (filtering && !isClosed && cardMatchesFilters(ch)) extra += ' lit';
     if (!myTurn) extra += ' disabled-cursor';
     return charCardHTML(ch, i, extra.trim());
   }).join('');
@@ -579,14 +610,16 @@ function initPlayControls() {
     renderChat(activeEngine.state);
   });
 
-  // Filter rail: tap a trait chip to light up the cards that have it.
+  // Filter rail: tap trait chips (any number) to light up matching cards.
   $('#filter-panel').addEventListener('click', (e) => {
+    if (!activeEngine) return;
+    if (e.target.closest('[data-clear]')) { clearFilters(); renderPlay(activeEngine.state); return; }
     const btn = e.target.closest('.fchip');
-    if (!btn || btn.disabled || !activeEngine) return;
+    if (!btn || btn.disabled) return;
     const trait = btn.dataset.trait, value = btn.dataset.value;
-    activeFilter = (activeFilter && activeFilter.trait === trait && activeFilter.value === value)
-      ? null                          // tapping the active chip clears it
-      : { trait, value };
+    const set = activeFilters[trait] || (activeFilters[trait] = new Set());
+    if (set.has(value)) set.delete(value); else set.add(value);   // toggle
+    if (set.size === 0) delete activeFilters[trait];
     renderPlay(activeEngine.state);
   });
 }
