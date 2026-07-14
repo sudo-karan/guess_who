@@ -356,6 +356,13 @@ function renderPlay(s) {
   $('#opp-open').textContent = s.oppOpen;
   $('#opp-closed').textContent = s.oppClosed;
 
+  // A private reminder of your own secret character (only ever your own, and in
+  // pass-and-play the opponent has already looked away for your turn).
+  const mine = CHAR_BY_ID[s.mySecret];
+  $('#my-secret').innerHTML = mine
+    ? `${renderAvatar(mine, mine.id)}<span class="ms-name">${mine.name}</span>`
+    : '';
+
   // Board of the opponent's characters (my deduction surface).
   const grid = $('#play-grid');
   const guessing = s.turnMode === 'guess' && myTurn;
