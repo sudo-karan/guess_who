@@ -298,3 +298,17 @@ export const TRAIT_LABELS = {
 };
 
 export const CHAR_BY_ID = Object.fromEntries(CHARACTERS.map((c) => [c.id, c]));
+
+// A short human-readable summary of a character's traits, for hover tooltips.
+export function describeTraits(ch) {
+  const T = TRAIT_LABELS;
+  const parts = [];
+  parts.push(ch.style === 'bald' ? 'Bald' : `${T.hair.values[ch.hair]} ${T.style.values[ch.style].toLowerCase()} hair`);
+  parts.push(`${T.eye.values[ch.eye]} eyes`);
+  parts.push(`${T.skin.values[ch.skin]} skin`);
+  if (ch.glasses !== 'none') parts.push(`${T.glasses.values[ch.glasses]} glasses`);
+  if (ch.hat !== 'none') parts.push(T.hat.values[ch.hat]);
+  if (ch.beard !== 'none') parts.push(T.beard.values[ch.beard]);
+  if (ch.acc !== 'none') parts.push(T.acc.values[ch.acc]);
+  return parts.join(' · ');
+}

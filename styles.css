@@ -274,6 +274,18 @@ body {
   font-weight: 700; box-shadow: var(--shadow); z-index: 60; animation: fade 0.2s ease;
 }
 
+/* --------------------------- trait tooltip -------------------------- */
+.tooltip {
+  position: fixed; z-index: 70; pointer-events: none;
+  background: var(--ink); color: #fff; padding: 9px 13px; border-radius: 10px;
+  font-size: 0.85rem; font-weight: 600; max-width: 230px; line-height: 1.4;
+  box-shadow: var(--shadow); animation: fade 0.12s ease;
+}
+.tooltip b { color: var(--yellow); }
+
+/* make the secret card feel hoverable */
+.ms-card { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: help; }
+
 /* --------------------------- responsive ----------------------------- */
 @media (max-width: 860px) {
   .play-body { grid-template-columns: 1fr; }
