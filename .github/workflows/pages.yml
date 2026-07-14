@@ -1,7 +1,8 @@
 name: Deploy to GitHub Pages
 
 # Publishes the static site to GitHub Pages whenever the default branch updates.
-# Enable it once under: Settings → Pages → Source → "GitHub Actions".
+# `enablement: true` on the Setup Pages step turns Pages on automatically, so no
+# manual Settings → Pages toggle is needed for the first deploy.
 on:
   push:
     branches: [main]
@@ -28,6 +29,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Setup Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Upload site
         uses: actions/upload-pages-artifact@v3
         with:
