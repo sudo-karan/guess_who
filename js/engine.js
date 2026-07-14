@@ -124,7 +124,10 @@ export function createEngine({ isHost, myName }) {
     state.myBoard = board.slice();
     state.mySecret = secret;
     state.myReady = true;
-    state.phase = state.oppReady ? state.phase : 'waiting';
+    // Always move to a committed 'waiting' state; maybeBegin() flips it to
+    // 'play' for the host once both boards are in. Staying on 'setup' would
+    // leave the second player on the live builder and let them re-submit.
+    state.phase = 'waiting';
     send({ type: 'setup', name: state.myName, board: state.myBoard });
     change();
     maybeBegin();
@@ -225,6 +228,7 @@ export function createEngine({ isHost, myName }) {
     state.winner = null;
     state.lastGuess = null;
     state.revealed = false;
+    state.chat = [];
     change();
   }
 
@@ -281,8 +285,13 @@ export function createEngine({ isHost, myName }) {
         break;
       }
       case 'rematch': {
-        resetForRematch();
-        log('Opponent wants a rematch — new round!');
+        // Only honour a rematch request while still on the game-over screen.
+        // Ignoring it otherwise stops a late/duplicate message from wiping a
+        // board the receiver has already started building for the next round.
+        if (state.phase === 'over') {
+          resetForRematch();
+          log('Opponent wants a rematch — new round!');
+        }
         break;
       }
       default:

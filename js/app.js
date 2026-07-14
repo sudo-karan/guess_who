@@ -142,13 +142,34 @@ function routeOnline(s) {
 function handleNetError(e) {
   const msg = (e && e.message) || 'Connection problem.';
   setNetStatus(msg, 'error');
-  // If we're already past the lobby, surface it where the player can see it.
-  if (!screens.home.classList.contains('active')) toast('⚠️ ' + msg);
+  if (screens.home.classList.contains('active')) return; // still in the lobby
+
+  // Past the lobby: a dropped connection would otherwise leave this client stuck
+  // forever (e.g. on "Awaiting result…"). Drive it to a terminal screen with a
+  // way home instead.
+  if (G.mode === 'online' && activeEngine && activeEngine.state.phase !== 'over') {
+    showDisconnected();
+  } else {
+    toast('⚠️ ' + msg);
+  }
+}
+
+function showDisconnected() {
+  $('#over-emoji').textContent = '🔌';
+  $('#over-title').textContent = 'Opponent left';
+  $('#over-title').style.color = 'var(--ink)';
+  $('#over-sub').innerHTML = 'Your opponent disconnected — the game can\'t continue.';
+  $('#reveal-row').innerHTML = '';
+  $('#btn-rematch').classList.add('hidden');   // nobody to rematch with
+  showScreen('over');
 }
 
 /* ------------------------------ local ------------------------------- */
 function startLocal() {
+  // Tear down any half-open online room so a late joiner can't hijack this game.
+  if (G.channel) { G.channel.close(); G.channel = null; }
   G.mode = 'local';
+  activeEngine = null;
   const pair = createLocalPair();
   const A = createEngine({ isHost: true, myName: 'Player 1' });
   const B = createEngine({ isHost: false, myName: 'Player 2' });
@@ -156,7 +177,8 @@ function startLocal() {
   B.on('send', pair.b.send); pair.b.onData(B.handleMessage);
   A.on('change', () => onLocalEngineChange(A));
   B.on('change', () => onLocalEngineChange(B));
-  A.on('log', (t) => toast(t)); B.on('log', (t) => toast(t));
+  // No log->toast wiring in local mode: the only engine log is the rematch
+  // notice, which would misleadingly toast the very player who clicked Rematch.
   G.A = A; G.B = B;
 
   // Sequential hot-seat setup, then first player's turn.
@@ -312,7 +334,9 @@ function buildLegend() {
 
 function ensurePlayView() {
   buildLegend();
-  showScreen('play');
+  // Only switch (and scroll) on the first entry into the board — otherwise every
+  // state change would re-scroll the page to the top mid-game.
+  if (!screens.play.classList.contains('active')) showScreen('play');
 }
 
 function renderPlay(s) {
@@ -463,6 +487,10 @@ function initPlayControls() {
 
 /* ------------------------------- over ------------------------------- */
 function showOver(s) {
+  // Restore the rematch button (a prior disconnect screen may have hidden/disabled it).
+  $('#btn-rematch').classList.remove('hidden');
+  $('#btn-rematch').disabled = false;
+
   const iWon = s.winner === 'me';
   $('#over-emoji').textContent = iWon ? '🏆' : '😅';
   $('#over-title').textContent = iWon ? 'You win! 🎉' : 'You lose!';
@@ -500,6 +528,7 @@ function revealCardHTML(label, ch) {
 
 function initOverControls() {
   $('#btn-rematch').onclick = () => {
+    $('#btn-rematch').disabled = true;   // debounce: one rematch request per game-over
     if (G.mode === 'online') {
       // Resets both engines to 'setup'; routeOnline re-opens the board builder
       // for both players.
