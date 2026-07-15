@@ -319,6 +319,33 @@ body {
 }
 .oc-line.me .oc-text { background: var(--purple); color: #fff; border-color: var(--purple); }
 
+/* ----------------------- "it's your turn" popup --------------------- */
+.turn-popup { position: fixed; inset: 0; display: grid; place-items: center; z-index: 55; pointer-events: none; }
+.turn-popup .tp-card {
+  pointer-events: auto; background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 24px 34px; text-align: center; border: 3px solid var(--green); animation: pop 0.3s ease;
+}
+.tp-emoji { font-size: 2.8rem; display: block; }
+.tp-card h3 { margin: 6px 0 14px; font-size: 1.5rem; color: var(--green); }
+
+/* ---------------------- question builder / answer ------------------- */
+.qb-modal { max-width: 640px; width: 100%; text-align: left; }
+.qb-modal h3 { text-align: center; }
+.qb-hint { text-align: left; }
+.qb-panel { max-height: 48vh; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; margin: 6px 0 4px; }
+.qb-summary { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 8px 0 4px; font-size: 0.9rem; min-height: 1.4em; }
+.qb-summary .qb-empty { color: var(--ink-soft); }
+.qb-actions { flex-wrap: wrap; }
+
+.qa-modal { max-width: 480px; width: 100%; }
+.qa-hint { text-align: center; }
+.qa-rows { display: flex; flex-direction: column; gap: 10px; text-align: left; }
+.qa-row { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.qa-row.done { opacity: 0.75; }
+.qa-q { margin-bottom: 10px; }
+.qa-btns { display: flex; gap: 12px; justify-content: center; }
+.qa-btns .btn { min-width: 90px; }
+
 /* ------------------------------ modal ------------------------------- */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(43, 33, 64, 0.55);
