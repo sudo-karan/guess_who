@@ -191,6 +191,39 @@
     </div>
   </div>
 
+  <!-- "It's your turn" popup (online) — auto-dismisses after 3s -->
+  <div id="turn-popup" class="turn-popup hidden">
+    <div class="tp-card">
+      <span class="tp-emoji">🎲</span>
+      <h3 id="tp-title">It's your turn!</h3>
+      <button class="btn primary" id="tp-ok">OK</button>
+    </div>
+  </div>
+
+  <!-- Predefined-question builder -->
+  <div id="qbuilder" class="modal-overlay hidden">
+    <div class="modal qb-modal">
+      <h3>🧩 Build a question</h3>
+      <p class="qb-hint">Pick trait(s) to ask about — your rival answers yes/no. You can pick several. Prefer to ask out loud? Use the chat instead.</p>
+      <div id="qb-panel" class="qb-panel"></div>
+      <div id="qb-summary" class="qb-summary"></div>
+      <div class="modal-actions qb-actions">
+        <button class="btn ghost" id="qb-cancel">Cancel</button>
+        <button class="btn ghost" id="qb-outloud">Ask out loud instead</button>
+        <button class="btn primary" id="qb-send" disabled>Send question →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Answer a structured question (online answerer) -->
+  <div id="qanswer" class="modal-overlay hidden">
+    <div class="modal qa-modal">
+      <h3 id="qa-title">🙋 A question for you</h3>
+      <p class="qa-hint">Answer truthfully about <b>your</b> secret character.</p>
+      <div id="qa-rows" class="qa-rows"></div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
   <div id="tooltip" class="tooltip hidden"></div>
 

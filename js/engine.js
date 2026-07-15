@@ -162,6 +162,28 @@ export function createEngine({ isHost, myName }) {
     return true;
   }
 
+  // Ask a *structured* question built from trait features. Like askQuestion it
+  // locks guessing for the turn, but it also carries the picked features so the
+  // opponent can answer yes/no. `text` is the human-readable summary (built by
+  // the UI, which owns the trait labels). Logged to chat on both sides.
+  function askStructured(features, text) {
+    if (!myTurn() || state.asked || state.guessing) return false;
+    if (!Array.isArray(features) || !features.length) return false;
+    state.asked = true;
+    state.chat.push({ from: 'me', text: '🙋 ' + (text || 'a question') });
+    send({ type: 'question', features, text: text || '' });
+    change();
+    return true;
+  }
+
+  // Answer a structured question. `answers` is [{trait,value,yes}]; `text` is the
+  // readable summary. The yes/no truth is decided by the UI (it owns the roster).
+  function answerStructured(answers, text) {
+    state.chat.push({ from: 'me', text: '✅ ' + (text || '') });
+    send({ type: 'answer', answers: answers || [], text: text || '' });
+    change();
+  }
+
   // Enter "guess" selection mode. Refused once you've asked a question this turn.
   function beginGuess() {
     if (!myTurn() || state.asked) return false;
@@ -275,6 +297,20 @@ export function createEngine({ isHost, myName }) {
         ev.emit('ask', msg.name || state.oppName || 'Your rival');
         break;
       }
+      case 'question': {
+        // Opponent asked a structured question — log it and surface it to answer.
+        state.chat.push({ from: 'opp', text: '🙋 ' + (msg.text || 'a question') });
+        ev.emit('question', { features: Array.isArray(msg.features) ? msg.features : [], text: msg.text || '' });
+        change();
+        break;
+      }
+      case 'answer': {
+        // Reply to a structured question I asked.
+        state.chat.push({ from: 'opp', text: '✅ ' + (msg.text || '') });
+        ev.emit('answer', { answers: Array.isArray(msg.answers) ? msg.answers : [], text: msg.text || '' });
+        change();
+        break;
+      }
       case 'guess': {
         // Opponent guessed MY secret. My client is the source of truth.
         const correct = msg.id === state.mySecret;
@@ -318,7 +354,8 @@ export function createEngine({ isHost, myName }) {
     // setup
     setupLocal,
     // play actions
-    toggleCard, askQuestion, beginGuess, cancelGuess, makeGuess, endTurn,
+    toggleCard, askQuestion, askStructured, answerStructured,
+    beginGuess, cancelGuess, makeGuess, endTurn,
     sendChat, requestRematch,
     // networking
     handleMessage,

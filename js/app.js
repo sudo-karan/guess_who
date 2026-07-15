@@ -167,6 +167,8 @@ function makeOnlineEngine(isHost) {
     body: `<b>${escapeHTML(who)}</b> chose to ask a question this turn. Answer them (use the chat if you like) — they can't guess this turn.`,
     okText: 'Got it',
   }));
+  engine.on('question', ({ features }) => showAnswerUI(engine, features));
+  engine.on('answer', ({ text }) => toast('💬 Rival answered — ' + text));
   activeEngine = engine;
   return engine;
 }
@@ -221,16 +223,23 @@ function joinOnline() {
 }
 
 // Route online state changes to the right screen.
+let prevOnlineTurn = null;
 function routeOnline(s) {
   if (s.phase === 'setup') {
+    prevOnlineTurn = null;
     // Only reached again after a rematch reset; re-enter the board builder.
     if (!screens.setup.classList.contains('active')) enterSetup(activeEngine);
   } else if (s.phase === 'waiting') {
+    prevOnlineTurn = null;
     showPass({ title: 'Board locked in! 🔒', sub: 'Waiting for your opponent to finish setting up…' });
   } else if (s.phase === 'play') {
     ensurePlayView();
+    // Announce when control passes TO me (i.e. the opponent just ended their turn).
+    if (s.turn === 'me' && prevOnlineTurn === 'opp' && !s.pendingGuess) showTurnPopup();
+    prevOnlineTurn = s.turn;
     renderPlay(s);
   } else if (s.phase === 'over') {
+    prevOnlineTurn = null;
     showOver(s);
   }
 }
@@ -274,6 +283,12 @@ function startLocal() {
   B.on('send', pair.b.send); pair.b.onData(B.handleMessage);
   A.on('change', () => onLocalEngineChange(A));
   B.on('change', () => onLocalEngineChange(B));
+  // Pass-and-play: the opponent isn't looking, so each engine answers a
+  // structured question truthfully from its own secret. The answer shows in chat.
+  A.on('question', ({ features }) => autoAnswer(A, features));
+  B.on('question', ({ features }) => autoAnswer(B, features));
+  A.on('answer', ({ text }) => { if (activeEngine === A) toast('💬 Answer — ' + text); });
+  B.on('answer', ({ text }) => { if (activeEngine === B) toast('💬 Answer — ' + text); });
   // No log->toast wiring in local mode: the only engine log is the rematch
   // notice, which would misleadingly toast the very player who clicked Rematch.
   G.A = A; G.B = B;
@@ -607,18 +622,7 @@ function initPlayControls() {
     handleBoardClick(Number(el.dataset.id));
   });
 
-  $('#btn-ask').onclick = async () => {
-    const e = activeEngine; const s = e.state;
-    if (s.turn !== 'me' || s.pendingGuess || s.asked || s.guessing) return;
-    const ok = await confirmModal({
-      title: 'Ask a question?',
-      body: 'Ask your rival one yes/no question this turn. Heads up: once you ask, you <b>can\'t guess</b> until your next turn.',
-      okText: 'Yes, ask away', cancelText: 'Never mind',
-    });
-    if (!ok) return;
-    e.askQuestion();
-    toast('Question asked — cross off who doesn\'t fit, then End Turn.');
-  };
+  $('#btn-ask').onclick = () => openQuestionBuilder();
 
   $('#btn-guess').onclick = () => {
     const e = activeEngine; const s = e.state;
@@ -662,6 +666,138 @@ function initPlayControls() {
     if (set.size === 0) delete activeFilters[trait];
     renderPlay(activeEngine.state);
   });
+}
+
+/* --------------------- "it's your turn" popup (online) -------------- */
+let turnPopupTimer = null;
+function showTurnPopup() {
+  const el = $('#turn-popup');
+  el.classList.remove('hidden');
+  clearTimeout(turnPopupTimer);
+  turnPopupTimer = setTimeout(() => el.classList.add('hidden'), 3000);
+}
+function initTurnPopup() {
+  $('#tp-ok').onclick = () => { clearTimeout(turnPopupTimer); $('#turn-popup').classList.add('hidden'); };
+}
+
+/* -------------------- structured (predefined) questions ------------- */
+let qbSelected = {};   // { trait: Set(values) } chosen in the builder
+
+const featureLabel = (f) => {
+  const meta = TRAIT_LABELS[f.trait];
+  return meta ? `${meta.name}: ${meta.values[f.value]}` : `${f.trait}: ${f.value}`;
+};
+const buildQuestionText = (features) => features.map(featureLabel).join(' · ');
+const buildAnswerText = (answers) => answers.map((a) => `${featureLabel(a)} → ${a.yes ? 'Yes' : 'No'}`).join(' · ');
+const computeTruth = (secretId, f) => {
+  const ch = CHAR_BY_ID[secretId];
+  return !!ch && ch[f.trait] === f.value;
+};
+function qbFeatures() {
+  const out = [];
+  for (const [trait, set] of Object.entries(qbSelected)) for (const value of set) out.push({ trait, value });
+  return out;
+}
+
+function openQuestionBuilder() {
+  const e = activeEngine; if (!e) return;
+  const s = e.state;
+  if (s.turn !== 'me' || s.pendingGuess || s.asked || s.guessing) return;
+  qbSelected = {};
+  renderQBuilder();
+  $('#qbuilder').classList.remove('hidden');
+}
+
+function renderQBuilder() {
+  $('#qb-panel').innerHTML = Object.entries(TRAIT_LABELS).map(([key, meta]) => {
+    const sel = qbSelected[key];
+    const chips = Object.entries(meta.values).map(([val, label]) => {
+      const active = sel && sel.has(val);
+      return `<button class="fchip${active ? ' active' : ''}" data-trait="${key}" data-value="${val}">${label}</button>`;
+    }).join('');
+    return `<div class="filter-sec"><div class="fs-title">${meta.name}</div><div class="fs-chips">${chips}</div></div>`;
+  }).join('');
+  const feats = qbFeatures();
+  $('#qb-summary').innerHTML = feats.length
+    ? `<b>Your question:</b> ${escapeHTML(buildQuestionText(feats))}`
+    : '<span class="qb-empty">No traits picked yet — or ask out loud in the chat.</span>';
+  $('#qb-send').disabled = feats.length === 0;
+}
+
+// The opponent answers a structured question (online). Honesty is enforced:
+// clicking the untruthful button warns instead of recording.
+function showAnswerUI(engine, features) {
+  const rows = $('#qa-rows');
+  const answered = {};
+  $('#qa-title').textContent = `🙋 ${engine.state.oppName || 'Your rival'} asks:`;
+  const render = () => {
+    rows.innerHTML = features.map((f, i) => {
+      const done = i in answered;
+      return `<div class="qa-row ${done ? 'done' : ''}">
+        <div class="qa-q">Does your character have <b>${escapeHTML(featureLabel(f))}</b>?</div>
+        <div class="qa-btns">
+          <button class="btn ${done && answered[i] ? 'primary' : 'ghost'}" data-i="${i}" data-ans="yes" ${done ? 'disabled' : ''}>Yes</button>
+          <button class="btn ${done && !answered[i] ? 'primary' : 'ghost'}" data-i="${i}" data-ans="no" ${done ? 'disabled' : ''}>No</button>
+        </div></div>`;
+    }).join('');
+  };
+  render();
+  $('#qanswer').classList.remove('hidden');
+  rows.onclick = async (ev) => {
+    const btn = ev.target.closest('button[data-ans]'); if (!btn) return;
+    const i = Number(btn.dataset.i);
+    const said = btn.dataset.ans === 'yes';
+    const truth = computeTruth(engine.state.mySecret, features[i]);
+    if (said !== truth) {
+      await noticeModal({
+        title: '🚫 Answer honestly!',
+        body: `Your character does <b>${truth ? '' : 'not '}</b>have <b>${escapeHTML(featureLabel(features[i]))}</b>. Please answer truthfully.`,
+        okText: 'Oops — ok',
+      });
+      return;
+    }
+    answered[i] = said;
+    render();
+    if (Object.keys(answered).length === features.length) {
+      const answers = features.map((f, idx) => ({ ...f, yes: !!answered[idx] }));
+      engine.answerStructured(answers, buildAnswerText(answers));
+      $('#qanswer').classList.add('hidden');
+      rows.onclick = null;
+    }
+  };
+}
+
+// In pass-and-play the opponent isn't looking, so the app answers truthfully
+// from their (the other engine's) secret automatically.
+function autoAnswer(engine, features) {
+  const answers = features.map((f) => ({ ...f, yes: computeTruth(engine.state.mySecret, f) }));
+  engine.answerStructured(answers, buildAnswerText(answers));
+}
+
+function initQuestionUI() {
+  $('#qb-panel').addEventListener('click', (e) => {
+    const btn = e.target.closest('.fchip'); if (!btn) return;
+    const t = btn.dataset.trait, v = btn.dataset.value;
+    const set = qbSelected[t] || (qbSelected[t] = new Set());
+    if (set.has(v)) set.delete(v); else set.add(v);
+    if (set.size === 0) delete qbSelected[t];
+    renderQBuilder();
+  });
+  $('#qb-cancel').onclick = () => $('#qbuilder').classList.add('hidden');
+  $('#qb-outloud').onclick = () => {
+    $('#qbuilder').classList.add('hidden');
+    const e = activeEngine;
+    if (e && e.askQuestion()) toast('Question asked out loud — cross off who doesn\'t fit, then End Turn.');
+  };
+  $('#qb-send').onclick = () => {
+    const e = activeEngine; if (!e) return;
+    const feats = qbFeatures();
+    if (!feats.length) return;
+    if (e.askStructured(feats, buildQuestionText(feats))) {
+      $('#qbuilder').classList.add('hidden');
+      toast(G.mode === 'online' ? 'Question sent — waiting for a reply.' : 'Question asked!');
+    }
+  };
 }
 
 /* ------------------------------- over ------------------------------- */
@@ -763,3 +899,5 @@ initSetupControls();
 initPlayControls();
 initOverControls();
 initTooltip();
+initTurnPopup();
+initQuestionUI();
