@@ -1,5 +1,5 @@
 // app.js — UI + orchestration for Guess Whoo!
-import { generateRoster, renderAvatar, renderTraitStrip, TRAIT_LABELS, traitRows } from './characters.js';
+import { generateRoster, renderAvatar, TRAIT_LABELS, traitRows } from './characters.js';
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
 
@@ -72,9 +72,7 @@ function noticeModal({ title, body, okText = 'OK' }) {
 
 function charCardHTML(ch, idx, extraClass = '') {
   return `<div class="char ${extraClass}" data-id="${ch.id}">
-    <div class="char-face">${renderAvatar(ch, idx)}</div>
-    <span class="cname">${ch.name}</span>
-    ${renderTraitStrip(ch)}
+    ${renderAvatar(ch, idx)}<span class="cname">${ch.name}</span>
   </div>`;
 }
 

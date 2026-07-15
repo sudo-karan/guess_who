@@ -149,22 +149,11 @@ body {
   transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
 }
 .char:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
-/* A modest avatar thumbnail on a tinted band; the trait strip below carries the detail. */
-.char-face { display: grid; place-items: center; padding: 6px 0 2px; }
-.char .avatar { display: block; width: 96px; height: 96px; }
+.char .avatar { display: block; width: 100%; height: auto; }
 .char .cname {
-  display: block; text-align: center; font-weight: 800; font-size: 0.82rem;
-  padding: 2px 2px 4px; color: var(--ink); background: #fff;
+  display: block; text-align: center; font-weight: 800; font-size: 0.8rem;
+  padding: 3px 2px 5px; color: var(--ink); background: #fff;
 }
-/* always-visible trait readout */
-.tstrip {
-  display: grid; grid-template-columns: auto 1fr; gap: 1px 6px;
-  padding: 5px 9px 9px; font-size: 0.64rem; line-height: 1.5; background: #fff;
-  border-top: 1px solid var(--line);
-}
-.ts-k { color: var(--ink-soft); font-weight: 800; text-transform: uppercase; letter-spacing: 0.2px; }
-.ts-v { font-weight: 800; color: var(--ink); display: inline-flex; align-items: center; gap: 3px; }
-.ts-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,0.18); flex: none; }
 .char.picked { border-color: var(--purple); }
 .char.picked::after {
   content: '✓'; position: absolute; top: 6px; right: 6px;
