@@ -1,157 +1,137 @@
 // characters.js
-// 30 colorful "Guess Who" characters, rendered procedurally as inline SVG.
-// Every character is a unique combination of shared, askable traits so the
-// deduction essence of Guess Who is preserved.
+// 30 colourful "Guess Who" characters, rendered procedurally as inline SVG in a
+// clean, cohesive cartoon style (unified outline, rounded friendly faces). Every
+// character is a unique combination of shared, askable traits — and every trait
+// stays clearly visible in the drawing (e.g. sunglasses are translucent).
 
 /* ----------------------------- palettes ----------------------------- */
 
-const SKIN = {
-  light: '#ffd9b3',
-  tan:   '#f0b985',
-  brown: '#c98a52',
-  deep:  '#8d5524',
-};
+const SKIN = { light: '#ffd9b3', tan: '#f0b985', brown: '#c98a52', deep: '#8d5524' };
 
 const HAIR = {
-  black:  '#2b2b34',
-  brown:  '#6b4423',
-  blonde: '#f4d06f',
-  red:    '#d9552e',
-  gray:   '#c9ccd4',
-  blue:   '#3f8ee0',
-  pink:   '#f06fb0',
-  green:  '#4bb887',
+  black:  '#2b2b34', brown: '#7a4a24', blonde: '#f4cf5f', red: '#e0562c',
+  gray:   '#c9ccd4', blue:  '#3f8ee0', pink:   '#f06fb0', green: '#41ba86',
 };
 
-const EYE = {
-  brown: '#5b3a22',
-  blue:  '#3a7bd5',
-  green: '#3aa76d',
-};
+const EYE = { brown: '#6b4327', blue: '#3a7bd5', green: '#31a86c' };
 
 const SHIRT = {
-  red:    '#e74c3c',
-  blue:   '#3498db',
-  green:  '#2ecc71',
-  purple: '#9b59b6',
-  orange: '#e67e22',
-  teal:   '#1abc9c',
-  pink:   '#ff7eb9',
-  yellow: '#f7c948',
+  red: '#e8503a', blue: '#3a8fd4', green: '#2ec27e', purple: '#9b64d6',
+  orange: '#ef8c3b', teal: '#18b8a8', pink: '#ff7eb0', yellow: '#f6c445',
 };
 
 // Cheerful background tints, chosen per-character index for variety.
-const BG = [
-  '#fef3c7', '#dbeafe', '#dcfce7', '#fae8ff',
-  '#ffe4e6', '#e0f2fe', '#fef9c3', '#f0fdfa',
-];
+const BG = ['#fef1c9', '#dbeafe', '#dcfce7', '#fae8ff', '#ffe1e6', '#e0f2fe', '#eef7c9', '#e8f7f4'];
+
+// One unified outline colour ties every shape together (the "sticker" look).
+const LINE = '#48395c';
+const OL = (w = 2) => `stroke="${LINE}" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="round"`;
 
 /* ---------------------------- utilities ----------------------------- */
 
-// Darken a hex colour by `amt` (0..1) for shadows / bands.
 function shade(hex, amt) {
   const n = parseInt(hex.slice(1), 16);
   let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-  r = Math.round(r * (1 - amt));
-  g = Math.round(g * (1 - amt));
-  b = Math.round(b * (1 - amt));
+  r = Math.round(r * (1 - amt)); g = Math.round(g * (1 - amt)); b = Math.round(b * (1 - amt));
   return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
 }
 
 /* ------------------------- SVG part builders ------------------------ */
 
+// Hair drawn BEHIND the head (long flow + afro halo).
 function hairBack(style, c) {
+  const cs = shade(c, 0.16);
   switch (style) {
     case 'long':
-      return `<path d="M20,44 C18,18 33,11 50,11 C67,11 82,18 80,44 L80,76 C80,67 74,63 70,63 L70,44 C70,29 61,25 50,25 C39,25 30,29 30,44 L30,63 C26,63 20,67 20,76 Z" fill="${c}"/>`;
+      return `<path d="M25,49 C23,23 35,14 50,14 C65,14 77,23 75,49 L75,80 C75,70 69,65 65,65 L65,45
+              C65,32 58,28 50,28 C42,28 35,32 35,45 L35,65 C31,65 25,70 25,80 Z" fill="${c}" ${OL()}/>`;
     case 'afro':
-      return `<circle cx="50" cy="40" r="35" fill="${c}"/>
-              <circle cx="24" cy="34" r="12" fill="${shade(c,0.08)}"/>
-              <circle cx="76" cy="34" r="12" fill="${shade(c,0.08)}"/>`;
+      return `<path d="M50,7 C71,7 85,22 85,43 C85,52 80,59 73,61 C76,45 66,33 50,33 C34,33 24,45 27,61
+              C20,59 15,52 15,43 C15,22 29,7 50,7 Z" fill="${c}" ${OL()}/>
+              <circle cx="33" cy="25" r="5" fill="${cs}" opacity="0.55"/>
+              <circle cx="67" cy="25" r="5" fill="${cs}" opacity="0.55"/>`;
     default:
       return '';
   }
 }
 
+// Hair drawn IN FRONT (the hairline over the forehead).
 function hairFront(style, c) {
-  const dip = `C40,26 30,30 24,45 C22,20 34,14 50,14 C66,14 78,20 76,45 C70,30 60,26 50,26`;
+  const cap = 'M27,48 C25,24 36,15 50,15 C64,15 75,24 73,48 C68,35 60,31 50,31 C40,31 32,35 27,48 Z';
+  const cs = shade(c, 0.15);
   switch (style) {
     case 'bald':
       return '';
     case 'short':
-      return `<path d="M24,45 ${dip} Z" fill="${c}"/>`;
     case 'long':
-      return `<path d="M24,45 ${dip} Z" fill="${c}"/>`;
+      return `<path d="${cap}" fill="${c}" ${OL()}/>`;
     case 'curly':
-      return `<g fill="${c}">
-        <circle cx="30" cy="27" r="10"/><circle cx="43" cy="20" r="11"/>
-        <circle cx="57" cy="20" r="11"/><circle cx="70" cy="27" r="10"/>
-        <circle cx="36" cy="33" r="9"/><circle cx="64" cy="33" r="9"/>
-        <path d="M24,42 C24,26 36,22 50,22 C64,22 76,26 76,42 C70,32 60,30 50,30 C40,30 30,32 24,42 Z"/>
-      </g>`;
+      return `<path d="M26,48 C25,32 29,22 37,20 C41,15 46,21 50,18 C54,21 59,15 63,20 C71,22 75,32 74,48
+              C68,37 60,33 50,33 C40,33 32,37 26,48 Z" fill="${c}" ${OL()}/>
+              <circle cx="34" cy="25" r="4.5" fill="${cs}"/><circle cx="50" cy="21" r="5" fill="${cs}"/>
+              <circle cx="66" cy="25" r="4.5" fill="${cs}"/>`;
     case 'spiky':
-      return `<path d="M24,42 L28,17 L35,33 L41,13 L47,31 L50,11 L53,31 L59,13 L65,33 L72,17 L76,42
-              C70,30 60,26 50,26 C40,26 30,30 24,42 Z" fill="${c}"/>`;
+      return `<path d="M26,46 L31,20 L38,35 L44,16 L50,31 L56,16 L62,35 L69,20 L74,46
+              C68,35 60,31 50,31 C40,31 32,35 26,46 Z" fill="${c}" ${OL()}/>`;
     case 'bun':
-      return `<circle cx="50" cy="14" r="9" fill="${c}"/>
-              <rect x="45" y="20" width="10" height="6" rx="3" fill="${shade(c,0.12)}"/>
-              <path d="M24,45 ${dip} Z" fill="${c}"/>`;
+      return `<circle cx="50" cy="13" r="8" fill="${c}" ${OL()}/>
+              <rect x="45.5" y="18" width="9" height="6" rx="3" fill="${cs}"/>
+              <path d="${cap}" fill="${c}" ${OL()}/>`;
     case 'mohawk':
-      return `<path d="M43,46 C40,18 46,9 50,9 C54,9 60,18 57,46 Z" fill="${c}"/>
-              <path d="M50,9 L45,20 L50,17 L55,20 Z" fill="${shade(c,0.15)}"/>`;
+      return `<path d="M43,49 C40,22 46,11 50,11 C54,11 60,22 57,49 Z" fill="${c}" ${OL()}/>
+              <path d="M47,21 L50,13 L53,21 Z" fill="${cs}"/>`;
     case 'afro':
-      return '';
+      // High hairline strip so the forehead reads as hair, framed by the halo behind.
+      return `<path d="M30,44 C30,33 38,30 50,30 C62,30 70,33 70,44 C64,37 58,34 50,34 C42,34 36,37 30,44 Z" fill="${c}"/>`;
     default:
       return '';
   }
 }
 
 function eyebrows(c) {
-  return `<g stroke="${c}" stroke-width="2.4" stroke-linecap="round" fill="none">
-    <path d="M32,39 Q39,35 46,39"/><path d="M54,39 Q61,35 68,39"/>
-  </g>`;
+  return `<g stroke="${c}" stroke-width="2.6" stroke-linecap="round" fill="none">
+    <path d="M33,41 Q40,37.5 47,41"/><path d="M53,41 Q60,37.5 67,41"/></g>`;
 }
 
 function eyes(eyeColor) {
-  const eye = (cx) => `
-    <ellipse cx="${cx}" cy="47" rx="6.5" ry="7.5" fill="#fff" stroke="#e2e2ea" stroke-width="0.8"/>
-    <circle cx="${cx}" cy="48" r="3.4" fill="${eyeColor}"/>
-    <circle cx="${cx}" cy="48" r="1.5" fill="#1a1a22"/>
-    <circle cx="${cx - 1.4}" cy="46" r="1" fill="#fff"/>`;
-  return eye(39) + eye(61);
+  const e = (cx) => `
+    <ellipse cx="${cx}" cy="50" rx="6" ry="6.6" fill="#fff" ${OL(1.4)}/>
+    <circle cx="${cx}" cy="51" r="3.9" fill="${eyeColor}"/>
+    <circle cx="${cx}" cy="51" r="1.9" fill="#20222c"/>
+    <circle cx="${cx - 1.5}" cy="48.4" r="1.3" fill="#fff"/>`;
+  return e(40) + e(60);
 }
 
 function glasses(kind) {
   if (kind === 'none') return '';
-  const arms = `<path d="M25,47 L15,44 M75,47 L85,44" stroke="#3a3a44" stroke-width="2" fill="none"/>`;
-  const bridge = `<line x1="46" y1="47" x2="54" y2="47" stroke="#3a3a44" stroke-width="2.2"/>`;
+  const fr = '#2f2a3a';
+  const arms = `<path d="M26,50 L18,48 M74,50 L82,48" stroke="${fr}" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+  const bridge = `<line x1="47" y1="50" x2="53" y2="50" stroke="${fr}" stroke-width="2.2"/>`;
   if (kind === 'round') {
-    return `<g>${arms}<circle cx="39" cy="47" r="9" fill="none" stroke="#3a3a44" stroke-width="2.4"/>
-      <circle cx="61" cy="47" r="9" fill="none" stroke="#3a3a44" stroke-width="2.4"/>${bridge}</g>`;
+    return `<g>${arms}<circle cx="40" cy="50" r="8.6" fill="none" stroke="${fr}" stroke-width="2.4"/>
+      <circle cx="60" cy="50" r="8.6" fill="none" stroke="${fr}" stroke-width="2.4"/>${bridge}</g>`;
   }
   if (kind === 'square') {
-    return `<g>${arms}<rect x="30" y="39" width="18" height="16" rx="3" fill="none" stroke="#3a3a44" stroke-width="2.4"/>
-      <rect x="52" y="39" width="18" height="16" rx="3" fill="none" stroke="#3a3a44" stroke-width="2.4"/>${bridge}</g>`;
+    return `<g>${arms}<rect x="31" y="42" width="18" height="16" rx="3.5" fill="none" stroke="${fr}" stroke-width="2.4"/>
+      <rect x="51" y="42" width="18" height="16" rx="3.5" fill="none" stroke="${fr}" stroke-width="2.4"/>${bridge}</g>`;
   }
-  // Sunglasses: TINTED but TRANSLUCENT lenses so eye colour still shows through
-  // (the eyes are drawn underneath). Fixes the "sunglasses hide a trait" problem.
+  // Sunglasses: tinted but TRANSLUCENT so the eye colour beneath still shows.
   return `<g>${arms}
-    <rect x="29" y="40" width="19" height="14" rx="4" fill="rgba(40,40,70,0.42)" stroke="#2b2b33" stroke-width="2"/>
-    <rect x="52" y="40" width="19" height="14" rx="4" fill="rgba(40,40,70,0.42)" stroke="#2b2b33" stroke-width="2"/>
-    <line x1="48" y1="43" x2="52" y2="43" stroke="#2b2b33" stroke-width="3"/>
-    <path d="M32,42 l4,0 M55,42 l4,0" stroke="rgba(255,255,255,0.6)" stroke-width="1.6" stroke-linecap="round"/></g>`;
+    <rect x="30" y="43" width="19" height="14" rx="4.5" fill="rgba(38,38,66,0.40)" stroke="${fr}" stroke-width="2"/>
+    <rect x="51" y="43" width="19" height="14" rx="4.5" fill="rgba(38,38,66,0.40)" stroke="${fr}" stroke-width="2"/>${bridge}
+    <path d="M33,45 l4,0 M55,45 l4,0" stroke="rgba(255,255,255,0.6)" stroke-width="1.5" stroke-linecap="round"/></g>`;
 }
 
 function facialHair(kind, c) {
   switch (kind) {
     case 'mustache':
-      return `<path d="M41,59 Q50,65 59,59 Q54,63 50,63 Q46,63 41,59 Z" fill="${c}"/>`;
+      return `<path d="M41,60 Q50,66 59,60 Q54,64 50,64 Q46,64 41,60 Z" fill="${c}" ${OL(1.2)}/>`;
     case 'beard':
-      return `<path d="M25,49 C25,80 39,90 50,90 C61,90 75,80 75,49
-              C71,67 62,73 50,73 C38,73 29,67 25,49 Z" fill="${c}"/>`;
+      return `<path d="M27,51 C27,79 40,89 50,89 C60,89 73,79 73,51 C69,68 61,74 50,74
+              C39,74 31,68 27,51 Z" fill="${c}" ${OL(1.6)}/>`;
     case 'goatee':
-      return `<path d="M41,59 Q50,65 59,59 Q54,63 50,63 Q46,63 41,59 Z" fill="${c}"/>
-              <path d="M44,69 Q50,82 56,69 Q50,74 44,69 Z" fill="${c}"/>`;
+      return `<path d="M41,60 Q50,66 59,60 Q54,64 50,64 Q46,64 41,60 Z" fill="${c}" ${OL(1.2)}/>
+              <path d="M45,70 Q50,82 55,70 Q50,74 45,70 Z" fill="${c}" ${OL(1.2)}/>`;
     default:
       return '';
   }
@@ -160,26 +140,25 @@ function facialHair(kind, c) {
 function hat(kind) {
   switch (kind) {
     case 'cap':
-      return `<path d="M24,31 C24,13 37,8 50,8 C63,8 76,13 76,31 Z" fill="#e74c3c"/>
-              <path d="M50,31 Q88,31 86,39 Q66,34 50,34 Z" fill="#c0392b"/>
-              <circle cx="50" cy="12" r="2.4" fill="#c0392b"/>`;
+      return `<path d="M25,32 C25,13 37,7 50,7 C63,7 75,13 75,32 Z" fill="#e8503a" ${OL()}/>
+              <path d="M49,32 C70,31 87,32 85,41 C68,36 49,36 49,35 Z" fill="#bd3c2b" ${OL(1.4)}/>
+              <circle cx="50" cy="11" r="2.4" fill="#bd3c2b"/>`;
     case 'beanie':
-      return `<path d="M23,35 C23,14 37,8 50,8 C63,8 77,14 77,35 Z" fill="#8e44ad"/>
-              <rect x="21" y="32" width="58" height="8" rx="4" fill="#6c3483"/>
-              <circle cx="50" cy="7" r="4" fill="#d2b4de"/>`;
+      return `<path d="M24,35 C24,15 37,8 50,8 C63,8 76,15 76,35 Z" fill="#8e63d4" ${OL()}/>
+              <rect x="22" y="32" width="56" height="9" rx="4.5" fill="#6f49b0" ${OL(1.4)}/>
+              <circle cx="50" cy="6" r="4" fill="#cdb6ef" ${OL(1.2)}/>`;
     case 'tophat':
-      return `<rect x="21" y="29" width="58" height="6" rx="3" fill="#2c2c34"/>
-              <rect x="32" y="3" width="36" height="28" rx="3" fill="#2c2c34"/>
-              <rect x="32" y="22" width="36" height="6" fill="#c0392b"/>`;
+      return `<rect x="21" y="31" width="58" height="6" rx="3" fill="#2c2c38" ${OL(1.4)}/>
+              <rect x="32" y="4" width="36" height="28" rx="4" fill="#2c2c38" ${OL()}/>
+              <rect x="32" y="23" width="36" height="6" fill="#e8503a"/>`;
     case 'crown':
-      return `<path d="M29,32 L29,15 L38,24 L44,10 L50,21 L56,10 L62,24 L71,15 L71,32 Z"
-              fill="#f4c430" stroke="#d4a017" stroke-width="1.4"/>
-              <circle cx="44" cy="17" r="2" fill="#e74c3c"/>
-              <circle cx="56" cy="17" r="2" fill="#3498db"/>`;
+      return `<path d="M29,33 L29,15 L38,24 L44,10 L50,21 L56,10 L62,24 L71,15 L71,33 Z" fill="#f4c430" ${OL()}/>
+              <circle cx="44" cy="18" r="2.2" fill="#e8503a"/><circle cx="56" cy="18" r="2.2" fill="#3f8ee0"/>
+              <circle cx="50" cy="28" r="2" fill="#e8503a"/>`;
     case 'party':
-      return `<path d="M50,1 L37,31 L63,31 Z" fill="#1abc9c"/>
-              <path d="M50,1 L44,15 M50,1 L56,15" stroke="#fff" stroke-width="2"/>
-              <circle cx="50" cy="1" r="4" fill="#f7c948"/>`;
+      return `<path d="M50,1 L36,32 L64,32 Z" fill="#18b8a8" ${OL()}/>
+              <path d="M42,20 L58,20 M45,26 L55,26" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>
+              <circle cx="50" cy="2" r="4" fill="#f4c430" ${OL(1.2)}/>`;
     default:
       return '';
   }
@@ -188,15 +167,15 @@ function hat(kind) {
 function accessoryNeck(kind) {
   switch (kind) {
     case 'bowtie':
-      return `<path d="M50,85 L40,80 L40,90 Z" fill="#e74c3c"/>
-              <path d="M50,85 L60,80 L60,90 Z" fill="#e74c3c"/>
-              <circle cx="50" cy="85" r="3" fill="#c0392b"/>`;
+      return `<path d="M50,85 L40,80 L40,90 Z" fill="#e8503a" ${OL(1.2)}/>
+              <path d="M50,85 L60,80 L60,90 Z" fill="#e8503a" ${OL(1.2)}/>
+              <circle cx="50" cy="85" r="3" fill="#bd3c2b"/>`;
     case 'necklace':
       return `<path d="M37,80 Q50,95 63,80" stroke="#f4c430" stroke-width="2.6" fill="none"/>
-              <circle cx="50" cy="92" r="3.2" fill="#f4c430"/>`;
+              <circle cx="50" cy="92" r="3.4" fill="#f4c430" ${OL(1)}/>`;
     case 'scarf':
-      return `<path d="M30,80 Q50,90 70,80 L70,90 Q50,99 30,90 Z" fill="#e84393"/>
-              <path d="M62,88 L70,100 L60,98 Z" fill="#c81e78"/>`;
+      return `<path d="M31,81 Q50,91 69,81 L69,91 Q50,99 31,91 Z" fill="#e84393" ${OL(1.4)}/>
+              <path d="M61,89 L69,100 L59,98 Z" fill="#c81e78" ${OL(1.2)}/>`;
     default:
       return '';
   }
@@ -205,11 +184,11 @@ function accessoryNeck(kind) {
 function accessoryFace(kind) {
   switch (kind) {
     case 'earrings':
-      return `<circle cx="23" cy="58" r="3" fill="#f4c430"/><circle cx="77" cy="58" r="3" fill="#f4c430"/>`;
+      return `<circle cx="26" cy="60" r="2.8" fill="#f4c430" ${OL(1)}/><circle cx="74" cy="60" r="2.8" fill="#f4c430" ${OL(1)}/>`;
     case 'freckles':
-      return `<g fill="rgba(180,110,70,0.55)">
-        <circle cx="34" cy="55" r="1.4"/><circle cx="38" cy="58" r="1.4"/><circle cx="41" cy="54" r="1.3"/>
-        <circle cx="59" cy="54" r="1.3"/><circle cx="62" cy="58" r="1.4"/><circle cx="66" cy="55" r="1.4"/>
+      return `<g fill="rgba(150,90,55,0.5)">
+        <circle cx="34" cy="57" r="1.4"/><circle cx="38" cy="60" r="1.4"/><circle cx="41" cy="56" r="1.3"/>
+        <circle cx="59" cy="56" r="1.3"/><circle cx="62" cy="60" r="1.4"/><circle cx="66" cy="57" r="1.4"/>
       </g>`;
     default:
       return '';
@@ -218,33 +197,37 @@ function accessoryFace(kind) {
 
 /* -------------------------- avatar renderer ------------------------- */
 
-// Build a full inline SVG string for a character.
 export function renderAvatar(ch, index = 0) {
   const skin = SKIN[ch.skin];
   const hair = HAIR[ch.hair];
   const eye = EYE[ch.eye];
   const shirt = SHIRT[ch.shirt];
   const bg = BG[index % BG.length];
-  const skinShade = shade(skin, 0.12);
+  const skinShade = shade(skin, 0.14);
 
   return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" class="avatar" role="img" aria-label="${ch.name}">
-    <rect x="0" y="0" width="100" height="100" rx="14" fill="${bg}"/>
-    <circle cx="50" cy="40" r="30" fill="rgba(255,255,255,0.35)"/>
-    <path d="M15,100 Q15,82 34,79 L66,79 Q85,82 85,100 Z" fill="${shirt}"/>
-    <path d="M15,100 Q15,82 34,79 L40,79 Q34,90 34,100 Z" fill="${shade(shirt,0.12)}"/>
-    <rect x="43" y="70" width="14" height="15" rx="6" fill="${skinShade}"/>
+    <rect x="0" y="0" width="100" height="100" rx="16" fill="${bg}"/>
+    <circle cx="50" cy="46" r="33" fill="rgba(255,255,255,0.42)"/>
+    <!-- shoulders + neck -->
+    <path d="M16,100 C16,83 30,77 50,77 C70,77 84,83 84,100 Z" fill="${shirt}" ${OL()}/>
+    <path d="M16,100 C16,83 30,77 40,77 C33,86 33,94 34,100 Z" fill="${shade(shirt, 0.12)}"/>
+    <path d="M43,66 h14 v11 q-7,4.5 -14,0 Z" fill="${skinShade}" ${OL(1.5)}/>
     ${hairBack(ch.style, hair)}
-    <circle cx="24" cy="52" r="6" fill="${skin}"/>
-    <circle cx="76" cy="52" r="6" fill="${skin}"/>
-    <ellipse cx="50" cy="48" rx="26" ry="29" fill="${skin}"/>
-    <ellipse cx="50" cy="48" rx="26" ry="29" fill="none" stroke="${skinShade}" stroke-width="0.8"/>
+    <!-- ears -->
+    <circle cx="26" cy="53" r="5.4" fill="${skin}" ${OL(1.5)}/>
+    <circle cx="74" cy="53" r="5.4" fill="${skin}" ${OL(1.5)}/>
+    <!-- head -->
+    <ellipse cx="50" cy="49" rx="24" ry="26" fill="${skin}" ${OL()}/>
     ${hairFront(ch.style, hair)}
+    <!-- cheeks -->
+    <circle cx="37" cy="57" r="4.6" fill="#ff8fa3" opacity="0.35"/>
+    <circle cx="63" cy="57" r="4.6" fill="#ff8fa3" opacity="0.35"/>
     ${eyebrows(hair)}
     ${eyes(eye)}
     ${glasses(ch.glasses)}
-    <path d="M50,50 q-4,7 -1,10 q3,2 6,0" fill="none" stroke="${skinShade}" stroke-width="2" stroke-linecap="round"/>
+    <path d="M50,53 q-3,6 -0.5,8 q2.5,1.6 5,0" fill="none" stroke="${skinShade}" stroke-width="2" stroke-linecap="round"/>
+    <path d="M43,62 Q50,69 57,62" fill="none" stroke="#a83b52" stroke-width="3" stroke-linecap="round"/>
     ${facialHair(ch.beard, hair)}
-    <path d="M42,63 Q50,71 58,63" stroke="#b23a48" stroke-width="3" fill="none" stroke-linecap="round"/>
     ${accessoryFace(ch.acc)}
     ${hat(ch.hat)}
     ${accessoryNeck(ch.acc)}
@@ -313,7 +296,6 @@ export const TRAIT_LABELS = {
 };
 
 // A section-by-section breakdown of a character's traits, for hover tooltips.
-// Every category is included (with its value, even "None").
 export function traitRows(ch) {
   const T = TRAIT_LABELS;
   return [
@@ -326,24 +308,4 @@ export function traitRows(ch) {
     { label: T.beard.name,   value: T.beard.values[ch.beard] },
     { label: T.acc.name,     value: T.acc.values[ch.acc] },
   ];
-}
-
-// An always-visible, compact trait readout shown directly on each card, so every
-// feature is legible at a glance (no need to interpret the drawing or hover).
-// Colour traits get a swatch dot.
-export function renderTraitStrip(ch) {
-  const T = TRAIT_LABELS;
-  const dot = (hex) => `<i class="ts-dot" style="background:${hex}"></i>`;
-  const cell = (k, v, hex) =>
-    `<span class="ts-k">${k}</span><span class="ts-v">${hex ? dot(hex) : ''}${v}</span>`;
-  return `<div class="tstrip">
-    ${cell('Hair', T.hair.values[ch.hair], HAIR[ch.hair])}
-    ${cell('Eyes', T.eye.values[ch.eye], EYE[ch.eye])}
-    ${cell('Style', T.style.values[ch.style])}
-    ${cell('Skin', T.skin.values[ch.skin], SKIN[ch.skin])}
-    ${cell('Specs', T.glasses.values[ch.glasses])}
-    ${cell('Hat', T.hat.values[ch.hat])}
-    ${cell('Beard', T.beard.values[ch.beard])}
-    ${cell('Extra', T.acc.values[ch.acc])}
-  </div>`;
 }
