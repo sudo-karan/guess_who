@@ -867,6 +867,16 @@ function initQuestionUI() {
     renderQBuilder();
   });
   $('#qb-cancel').onclick = () => $('#qbuilder').classList.add('hidden');
+  // Also dismiss the builder by clicking the backdrop or pressing Escape — same
+  // as Cancel (nothing is asked), so it never feels like you're trapped in it.
+  $('#qbuilder').addEventListener('click', (e) => {
+    if (e.target.id === 'qbuilder') $('#qbuilder').classList.add('hidden');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('#qbuilder').classList.contains('hidden')) {
+      $('#qbuilder').classList.add('hidden');
+    }
+  });
   $('#qb-outloud').onclick = async () => {
     const e = activeEngine;
     if (!e) return;
