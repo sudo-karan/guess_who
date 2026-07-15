@@ -51,21 +51,21 @@ test('both setups begin play with host first', () => {
   assert.equal(B.state.oppName, 'A');
 });
 
-test('cannot ask/guess/end out of turn, but may take private notes', () => {
+test('no acting out of turn — not even crossing cards off', () => {
   const { A, B } = pair();
   setupBoth(A, B);
-  assert.equal(B.askQuestion(), false);   // not B's turn
+  assert.equal(B.askQuestion(), false);    // not B's turn
   assert.equal(B.beginGuess(), false);
   assert.equal(B.endTurn(), false);
-  // ...but crossing cards off my own board is always allowed
-  assert.equal(B.toggleCard(5), true);
-  assert.equal(B.state.deduction[5], false);
+  // Crossing off is now a TURN action too (reverses the old "any time" rule).
+  assert.equal(B.toggleCard(5), false);
+  assert.equal(B.state.deduction[5], true);   // stays open — nothing changed
 });
 
-test('disabling is free and never blocks guessing', () => {
+test('crossing off on your turn never blocks guessing', () => {
   const { A, B } = pair();
   setupBoth(A, B);
-  assert.equal(A.toggleCard(5), true);     // no mode needed
+  assert.equal(A.toggleCard(5), true);     // A's turn
   assert.equal(A.state.deduction[5], false);
   assert.equal(A.beginGuess(), true);      // still allowed after disabling
   assert.equal(A.toggleCard(6), true);     // and disabling still works mid-guess
@@ -248,11 +248,125 @@ test('a full multi-turn game plays through', () => {
   assert.equal(A.state.winner, 'me');
 });
 
-test('a card can be crossed off during the opponents turn', () => {
+test('cards cannot be crossed off during the opponents turn', () => {
   const { A, B } = pair();
   setupBoth(A, B, 3, 7);          // A's turn first
   assert.equal(B.state.turn, 'opp');
-  assert.equal(B.toggleCard(4), true);       // B takes notes off-turn
-  assert.equal(B.state.deduction[4], false);
-  assert.equal(A.state.oppOpen, 19);          // A sees B's live progress
+  assert.equal(B.toggleCard(4), false);       // off-turn cross-off refused
+  assert.equal(B.state.deduction[4], true);   // stays open
+  assert.equal(A.state.oppOpen, 20);          // nothing leaked to A mid-turn
+});
+
+test('undo reverts this turn\'s card changes one at a time', () => {
+  const { A, B } = pair();
+  setupBoth(A, B);
+  A.toggleCard(5); A.toggleCard(6);
+  assert.equal(A.state.deduction[5], false);
+  assert.equal(A.state.deduction[6], false);
+  assert.equal(A.undoLastCard(), true);
+  assert.equal(A.state.deduction[6], true);    // most recent undone
+  assert.equal(A.state.deduction[5], false);   // earlier change stays
+  assert.equal(A.undoLastCard(), true);
+  assert.equal(A.state.deduction[5], true);
+  assert.equal(A.undoLastCard(), false);       // nothing left to undo
+  assert.equal(A.state.log.filter((e) => e.kind === 'card').length, 0);
+});
+
+test('undo is refused off-turn and when nothing changed', () => {
+  const { A, B } = pair();
+  setupBoth(A, B);
+  assert.equal(A.undoLastCard(), false);       // A's turn but no changes yet
+  assert.equal(B.undoLastCard(), false);       // not B's turn
+});
+
+test('End Turn reports NET card changes, not gross toggles', () => {
+  const { A, B } = pair();
+  setupBoth(A, B);
+  A.toggleCard(5); A.toggleCard(5);   // off then back on -> net 0
+  A.toggleCard(6);                    // net 1 off
+  A.endTurn();
+  const opp = B.state.log.filter((e) => e.kind === 'oppcards');
+  assert.equal(opp.length, 1);
+  assert.equal(opp[0].off, 1);
+  assert.equal(opp[0].on, 0);
+  assert.equal(B.state.oppOpen, 19);
+});
+
+test('a no-op turn logs no opponent card line', () => {
+  const { A, B } = pair();
+  setupBoth(A, B);
+  A.endTurn();                         // crossed nothing off
+  assert.equal(B.state.log.filter((e) => e.kind === 'oppcards').length, 0);
+});
+
+test('the activity log timestamps events with the injected clock', () => {
+  let t = 100;
+  const A = createEngine({ isHost: true, myName: 'A', now: () => t });
+  const B = createEngine({ isHost: false, myName: 'B', now: () => t });
+  A.on('send', (m) => B.handleMessage(m));
+  B.on('send', (m) => A.handleMessage(m));
+  A.setupLocal({ board: first20, secret: 3 });
+  B.setupLocal({ board: first20, secret: 7 });
+  t = 500; A.toggleCard(5);
+  t = 600; A.sendChat('hi');
+  assert.equal(A.state.log.find((e) => e.kind === 'card').ts, 500);
+  assert.equal(A.state.log.find((e) => e.kind === 'chat').ts, 600);
+  // B logs my chat at the SAME (sender) timestamp.
+  assert.equal(B.state.log.find((e) => e.kind === 'chat' && e.by === 'opp').ts, 600);
+});
+
+test('the full card log is exchanged at game end (both build the same transcript)', () => {
+  const { A, B } = pair();
+  setupBoth(A, B, 3, 7);
+  A.toggleCard(5); A.toggleCard(6); A.endTurn();   // A crosses 2 off
+  B.toggleCard(10); B.endTurn();                    // B crosses 1 off
+  A.beginGuess(); A.makeGuess(7);                   // A wins
+  assert.equal(A.state.oppCardLog.length, 1);       // B's one cross-off
+  assert.equal(A.state.oppCardLog[0].cardId, 10);
+  assert.equal(A.state.oppCardLog[0].by, 'opp');
+  assert.deepEqual(B.state.oppCardLog.map((e) => e.cardId).sort((a, b) => a - b), [5, 6]);
+});
+
+test('a guess is logged at the same timestamp on both sides', () => {
+  let t = 0;
+  const A = createEngine({ isHost: true, myName: 'A', now: () => (t += 1) });
+  const B = createEngine({ isHost: false, myName: 'B', now: () => (t += 1) });
+  A.on('send', (m) => B.handleMessage(m));
+  B.on('send', (m) => A.handleMessage(m));
+  A.setupLocal({ board: first20, secret: 3 });
+  B.setupLocal({ board: first20, secret: 7 });
+  A.beginGuess(); A.makeGuess(7);
+  const aG = A.state.log.find((e) => e.kind === 'guess');
+  const bG = B.state.log.find((e) => e.kind === 'guess');
+  assert.ok(aG && bG);
+  assert.equal(aG.ts, bG.ts);          // identical timestamp -> identical transcript
+  assert.equal(aG.cardId, 7);
+});
+
+test('shared events carry the same turn on both clients (identical rounds)', () => {
+  const { A, B } = pair();
+  setupBoth(A, B, 3, 7);
+  A.askStructured({ trait: 'hair', values: ['black'] }, 'Hair: Black');   // A's turn 1
+  A.endTurn();                       // A's counter -> 2; B takes its turn
+  B.sendChat('hmm');                 // B chats on ITS turn 1 (A already at 2)
+  // The ask A made appears at the same turn in both transcripts.
+  const aAsk = A.state.log.find((e) => e.kind === 'ask');
+  const bAsk = B.state.log.find((e) => e.kind === 'ask');
+  assert.equal(aAsk.turn, bAsk.turn);
+  // B's chat (its turn 1) is logged at the SAME turn on both sides, even though
+  // A's own counter has already advanced.
+  const aSeesBChat = A.state.log.find((e) => e.kind === 'chat' && e.by === 'opp');
+  const bOwnChat = B.state.log.find((e) => e.kind === 'chat' && e.by === 'me');
+  assert.equal(aSeesBChat.turn, bOwnChat.turn);
+});
+
+test('rematch clears the activity log + card tracking', () => {
+  const { A, B } = pair();
+  setupBoth(A, B, 3, 7);
+  A.toggleCard(5); A.endTurn(); B.endTurn();
+  A.requestRematch();
+  assert.equal(A.state.log.length, 0);
+  assert.equal(A.state.turnCardActions.length, 0);
+  assert.equal(A.state.oppCardLog.length, 0);
+  assert.equal(A.state.turnStartOff.size, 0);
 });

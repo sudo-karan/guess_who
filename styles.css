@@ -289,12 +289,27 @@ body {
   transform: translateY(-3px) scale(1.03); z-index: 3;
 }
 .play-grid.filtering .char:not(.lit):not(.closed) { opacity: 0.4; }
+/* Off-turn: crossing cards off is locked, so the board reads as non-interactive. */
+.play-grid.locked .char { cursor: default; }
+.play-grid.locked .char:not(.closed):hover { transform: none; }
 
 .chat-block { display: flex; flex-direction: column; }
-.chat-log { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
-.chat-msg { padding: 6px 10px; border-radius: 10px; font-size: 0.9rem; max-width: 90%; }
-.chat-msg.me { background: var(--purple); color: #fff; align-self: flex-end; }
-.chat-msg.opp { background: var(--paper); border: 1px solid var(--line); align-self: flex-start; }
+.chat-log { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 7px; margin-bottom: 8px; }
+
+/* Activity-log rows (live sidebar) */
+.log-row { display: flex; flex-direction: column; gap: 2px; font-size: 0.88rem; padding: 5px 9px; border-radius: 10px; border: 1px solid var(--line); background: #fff; }
+.log-row.me { border-color: color-mix(in srgb, var(--purple) 35%, var(--line)); background: color-mix(in srgb, var(--purple) 6%, #fff); }
+.log-row.opp { border-color: color-mix(in srgb, var(--pink) 30%, var(--line)); background: color-mix(in srgb, var(--pink) 6%, #fff); }
+.lr-meta { font-size: 0.7rem; color: var(--ink-soft); }
+.log-row.me .lr-meta b { color: var(--purple); }
+.log-row.opp .lr-meta b { color: var(--pink); }
+.lr-body { line-height: 1.35; }
+
+/* Small avatar chip referenced inside a log row / batch (hover shows traits) */
+.log-card { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 1px 6px 1px 1px; margin: 1px 2px; }
+.log-card .avatar { width: 26px; height: 26px; border-radius: 6px; }
+.lc-name { font-size: 0.78rem; font-weight: 700; }
+
 .chat-form { display: flex; gap: 6px; }
 .chat-form input { flex: 1; min-width: 0; padding: 8px 10px; border: 2px solid var(--line); border-radius: 10px; font-family: inherit; }
 
@@ -335,6 +350,22 @@ body {
   display: inline-block;
 }
 .oc-line.me .oc-text { background: var(--purple); color: #fff; border-color: var(--purple); }
+
+/* complete detailed log on the results screen */
+.ol-body { max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 14px; text-align: left; }
+.ol-turn { display: flex; flex-direction: column; gap: 7px; }
+.ol-turn-h { font-weight: 800; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.6px; color: var(--ink-soft); border-bottom: 2px dashed var(--line); padding-bottom: 4px; }
+.ol-line { font-size: 0.9rem; }
+.ol-line .oll-meta { font-size: 0.72rem; color: var(--ink-soft); margin-right: 6px; }
+.ol-line.me .oll-meta b { color: var(--purple); }
+.ol-line.opp .oll-meta b { color: var(--pink); }
+.ol-batch { border-radius: 10px; padding: 8px 10px; border: 1px solid var(--line); background: #fff; }
+.ol-batch.me { border-color: color-mix(in srgb, var(--purple) 35%, var(--line)); }
+.ol-batch.opp { border-color: color-mix(in srgb, var(--pink) 30%, var(--line)); }
+.olb-head { font-size: 0.86rem; font-weight: 700; margin-bottom: 6px; }
+.olb-cards { display: flex; flex-wrap: wrap; gap: 4px; }
+.olb-common { margin-top: 7px; font-size: 0.82rem; color: var(--ink-soft); }
+.olb-common b { color: var(--ink); }
 
 /* ----------------------- "it's your turn" popup --------------------- */
 .turn-popup { position: fixed; inset: 0; display: grid; place-items: center; z-index: 55; pointer-events: none; }
