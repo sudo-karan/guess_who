@@ -50,6 +50,7 @@ export function createRegistry() {
     },
     has(code) { return rooms.has(code); },
     size() { return rooms.size; },
+    clear() { rooms.clear(); },
     // Public view (newest first), without the internal ownerId bookkeeping.
     list() {
       return [...rooms.values()]
@@ -136,7 +137,12 @@ export function createLobby({ makePeer, onRooms = () => {}, onStatus = () => {} 
         subscribers.delete(c);
         if (registry.removeByOwner(c.peer)) broadcast();
       });
-      c.on('error', () => { subscribers.delete(c); });
+      c.on('error', () => {
+        // 'error' can fire without a clean 'close'; drop the client's rooms too so
+        // a departed host doesn't leave a ghost "Open" room that no longer connects.
+        subscribers.delete(c);
+        if (registry.removeByOwner(c.peer)) broadcast();
+      });
     });
     // As coordinator we serve ourselves directly (no self-connection needed).
     if (myRoom) { registry.publish('self', myRoom, tick()); }
@@ -184,6 +190,10 @@ export function createLobby({ makePeer, onRooms = () => {}, onStatus = () => {} 
   function start() {
     try { peer && peer.destroy(); } catch (_) {}
     peer = null; coordConn = null; role = null;
+    // Rebuild from scratch on every (re-)election so a stale in-memory registry
+    // can't resurrect dead rooms after we take over as coordinator.
+    registry.clear();
+    subscribers.clear();
     // Try to claim the well-known coordinator id.
     peer = mkPeer(LOBBY_ID);
     peer.on('open', () => { if (!closed) becomeCoordinator(); });
@@ -196,9 +206,15 @@ export function createLobby({ makePeer, onRooms = () => {}, onStatus = () => {} 
 
   return {
     start() { closed = false; start(); },
-    // Announce (or update) the room this browser is hosting.
+    // Announce (or update) the room this browser is hosting. A browser can only
+    // advertise ONE room, so re-publishing with a new code drops the previous one.
     publish(room) {
+      const prev = myRoom;
       myRoom = { code: room.code, hostName: room.hostName, status: room.status || ROOM_STATUS.OPEN };
+      if (prev && prev.code !== myRoom.code) {
+        if (role === 'coordinator') registry.remove(prev.code);
+        else if (coordConn) safeSend(coordConn, { t: 'unpub', code: prev.code });
+      }
       if (role === 'coordinator') { registry.publish('self', myRoom, tick()); broadcast(); }
       else if (coordConn) safeSend(coordConn, { t: 'pub', room: myRoom });
     },

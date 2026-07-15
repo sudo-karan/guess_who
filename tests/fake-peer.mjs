@@ -22,10 +22,11 @@ export function createFakeBroker() {
     const c = {
       peer: remoteId,
       other: null,
+      open: false,          // mirrors PeerJS DataConnection.open
       on(ev, fn) { (h[ev] || (h[ev] = [])).push(fn); return c; },
       emit(ev, a) { (h[ev] || []).forEach((fn) => fn(a)); },
       send(msg) { later(() => c.other && c.other.emit('data', msg)); },
-      _shutdown() { if (closed) return; closed = true; c.emit('close'); },
+      _shutdown() { if (closed) return; closed = true; c.open = false; c.emit('close'); },
       close() { later(() => { c._shutdown(); c.other && c.other._shutdown(); }); },
     };
     return c;
@@ -49,8 +50,9 @@ export function createFakeBroker() {
           const serverConn = makeConn(myId);
           target._track(serverConn);
           clientConn.other = serverConn; serverConn.other = clientConn;
+          serverConn.open = true;
           target.emit('connection', serverConn);
-          later(() => { serverConn.emit('open'); clientConn.emit('open'); });
+          later(() => { clientConn.open = true; serverConn.emit('open'); clientConn.emit('open'); });
         });
         return clientConn;
       },

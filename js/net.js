@@ -54,10 +54,16 @@ export function createOnlineChannel({ makePeer } = {}) {
   function wireHostConn(c) {
     c.on('data', (d) => {
       if (d && d.__t === H.JOIN) {
-        if (opened) { try { c.send({ __t: H.FULL }); } catch (_) {} softClose(c); return; }
+        // Already in a game: reject a DIFFERENT second guest as full, but ignore a
+        // duplicate join on the already-accepted connection (never kill the live game).
+        if (opened) { if (c !== conn) { try { c.send({ __t: H.FULL }); } catch (_) {} softClose(c); } return; }
         const name = String(d.name || 'A player').slice(0, 14);
         const accept = () => {
-          if (opened) { try { c.send({ __t: H.FULL }); } catch (_) {} softClose(c); return; }
+          if (opened) { if (c !== conn) { try { c.send({ __t: H.FULL }); } catch (_) {} softClose(c); } return; }
+          // The guest may have left while the host deliberated — don't commit the
+          // game to a dead connection (which would strand the host in setup and make
+          // every future guest hit "room full").
+          if (c.open === false) { status('The player left before you answered.'); return; }
           conn = c; opened = true;
           try { c.send({ __t: H.ACCEPT }); } catch (_) {}
           status('Connected!');
@@ -85,15 +91,25 @@ export function createOnlineChannel({ makePeer } = {}) {
   // GUEST side: once the data channel opens, ask to join and await the verdict.
   function wireGuestConn(c) {
     conn = c;   // tentative — not "opened" until the host accepts
+    let pending = [];   // game data that somehow arrives before ACCEPT is processed
     c.on('open', () => {
       status('Asking the host to let you in…');
       try { c.send({ __t: H.JOIN, name: myName }); } catch (_) {}
     });
     c.on('data', (d) => {
-      if (d && d.__t === H.ACCEPT) { opened = true; status('Connected!'); cbs.open && cbs.open(); return; }
+      if (d && d.__t === H.ACCEPT) {
+        opened = true; status('Connected!');
+        cbs.open && cbs.open();
+        // Flush anything (e.g. the roster) that raced ahead of the accept so it is
+        // never silently dropped — this is the guest's ONLY setup-entry trigger.
+        const q = pending; pending = [];
+        for (const m of q) cbs.data && cbs.data(m);
+        return;
+      }
       if (d && d.__t === H.DENY) { cbs.error && cbs.error({ type: 'denied', message: 'The host declined your request to join.' }); return; }
       if (d && d.__t === H.FULL) { cbs.error && cbs.error({ type: 'full', message: 'That room is already full.' }); return; }
       if (opened) cbs.data && cbs.data(d);
+      else if (d && !d.__t) pending.push(d);   // buffer game data until accepted
     });
     c.on('close', () => {
       if (opened) {
