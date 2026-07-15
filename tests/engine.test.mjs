@@ -98,36 +98,38 @@ test('the ask-lock clears on your next turn', () => {
   assert.equal(A.beginGuess(), true);
 });
 
-test('a structured question locks guessing and reaches the opponent', () => {
+test('a structured question (single trait, OR values) locks guessing and reaches the opponent', () => {
   const { A, B } = pair();
   setupBoth(A, B, 3, 7);
   let asked = null;
   B.on('question', (q) => { asked = q; });
-  const ok = A.askStructured([{ trait: 'hair', value: 'blonde' }], 'Hair colour: Blonde');
+  const ok = A.askStructured({ trait: 'glasses', values: ['none', 'sun'] }, 'Glasses: None or Sunglasses');
   assert.equal(ok, true);
   assert.equal(A.state.asked, true);
   assert.equal(A.beginGuess(), false);            // locked out after asking
-  assert.equal(asked.features.length, 1);         // opponent received the features
-  assert.equal(A.state.chat.at(-1).text.includes('Blonde'), true);
+  assert.equal(asked.question.trait, 'glasses');  // opponent received the question
+  assert.deepEqual(asked.question.values, ['none', 'sun']);
+  assert.equal(A.state.chat.at(-1).text.includes('Sunglasses'), true);
 });
 
-test('answering a structured question flows back to the asker', () => {
+test('answering a structured question flows back as a single yes/no', () => {
   const { A, B } = pair();
   setupBoth(A, B, 3, 7);
   let received = null;
   A.on('answer', (a) => { received = a; });
-  A.askStructured([{ trait: 'hair', value: 'blonde' }], 'Hair colour: Blonde');
-  B.answerStructured([{ trait: 'hair', value: 'blonde', yes: false }], 'Hair colour: Blonde -> No');
-  assert.equal(received.answers[0].yes, false);
+  A.askStructured({ trait: 'hair', values: ['blonde'] }, 'Hair colour: Blonde');
+  B.answerStructured(false, 'Hair colour: Blonde -> No');
+  assert.equal(received.yes, false);
   assert.equal(A.state.chat.at(-1).text.includes('No'), true);
 });
 
-test('structured ask is refused out of turn or after already asking', () => {
+test('structured ask is refused with no values, out of turn, or after asking', () => {
   const { A, B } = pair();
   setupBoth(A, B, 3, 7);
-  assert.equal(B.askStructured([{ trait: 'hair', value: 'blonde' }], 'x'), false); // not B's turn
+  assert.equal(A.askStructured({ trait: 'hair', values: [] }, 'x'), false);            // no values
+  assert.equal(B.askStructured({ trait: 'hair', values: ['blonde'] }, 'x'), false);    // not B's turn
   A.askQuestion();
-  assert.equal(A.askStructured([{ trait: 'hair', value: 'blonde' }], 'x'), false); // already asked
+  assert.equal(A.askStructured({ trait: 'hair', values: ['blonde'] }, 'x'), false);    // already asked
 });
 
 test('ending a turn reports counts and passes play', () => {

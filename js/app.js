@@ -1,5 +1,5 @@
 // app.js — UI + orchestration for Guess Whoo!
-import { generateRoster, renderAvatar, TRAIT_LABELS, traitRows } from './characters.js';
+import { generateRoster, renderAvatar, renderTraitStrip, TRAIT_LABELS, traitRows } from './characters.js';
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
 
@@ -72,7 +72,9 @@ function noticeModal({ title, body, okText = 'OK' }) {
 
 function charCardHTML(ch, idx, extraClass = '') {
   return `<div class="char ${extraClass}" data-id="${ch.id}">
-    ${renderAvatar(ch, idx)}<span class="cname">${ch.name}</span>
+    <div class="char-face">${renderAvatar(ch, idx)}</div>
+    <span class="cname">${ch.name}</span>
+    ${renderTraitStrip(ch)}
   </div>`;
 }
 
@@ -167,7 +169,7 @@ function makeOnlineEngine(isHost) {
     body: `<b>${escapeHTML(who)}</b> chose to ask a question this turn. Answer them (use the chat if you like) — they can't guess this turn.`,
     okText: 'Got it',
   }));
-  engine.on('question', ({ features }) => showAnswerUI(engine, features));
+  engine.on('question', ({ question }) => showAnswerUI(engine, question));
   engine.on('answer', ({ text }) => toast('💬 Rival answered — ' + text));
   activeEngine = engine;
   return engine;
@@ -285,8 +287,8 @@ function startLocal() {
   B.on('change', () => onLocalEngineChange(B));
   // Pass-and-play: the opponent isn't looking, so each engine answers a
   // structured question truthfully from its own secret. The answer shows in chat.
-  A.on('question', ({ features }) => autoAnswer(A, features));
-  B.on('question', ({ features }) => autoAnswer(B, features));
+  A.on('question', ({ question }) => autoAnswer(A, question));
+  B.on('question', ({ question }) => autoAnswer(B, question));
   A.on('answer', ({ text }) => { if (activeEngine === A) toast('💬 Answer — ' + text); });
   B.on('answer', ({ text }) => { if (activeEngine === B) toast('💬 Answer — ' + text); });
   // No log->toast wiring in local mode: the only engine log is the rematch
@@ -681,106 +683,95 @@ function initTurnPopup() {
 }
 
 /* -------------------- structured (predefined) questions ------------- */
-let qbSelected = {};   // { trait: Set(values) } chosen in the builder
+// One question is about a SINGLE trait with one or more values (joined by OR),
+// e.g. { trait:'glasses', values:['none','sun'] } → "Glasses: None or Sunglasses".
+let qbTrait = null;          // the chosen section (trait key), or null
+let qbValues = new Set();    // the picked values within that section
 
-const featureLabel = (f) => {
-  const meta = TRAIT_LABELS[f.trait];
-  return meta ? `${meta.name}: ${meta.values[f.value]}` : `${f.trait}: ${f.value}`;
+const buildQuestionText = (q) => {
+  const meta = TRAIT_LABELS[q.trait];
+  if (!meta) return '';
+  return `${meta.name}: ${q.values.map((v) => meta.values[v]).join(' or ')}`;
 };
-const buildQuestionText = (features) => features.map(featureLabel).join(' · ');
-const buildAnswerText = (answers) => answers.map((a) => `${featureLabel(a)} → ${a.yes ? 'Yes' : 'No'}`).join(' · ');
-const computeTruth = (secretId, f) => {
+const buildAnswerText = (q, yes) => `${buildQuestionText(q)} → ${yes ? 'Yes' : 'No'}`;
+const computeTruth = (secretId, q) => {
   const ch = CHAR_BY_ID[secretId];
-  return !!ch && ch[f.trait] === f.value;
+  return !!ch && q.values.includes(ch[q.trait]);
 };
-function qbFeatures() {
-  const out = [];
-  for (const [trait, set] of Object.entries(qbSelected)) for (const value of set) out.push({ trait, value });
-  return out;
-}
+const qbQuestion = () => (qbTrait && qbValues.size ? { trait: qbTrait, values: [...qbValues] } : null);
 
 function openQuestionBuilder() {
   const e = activeEngine; if (!e) return;
   const s = e.state;
   if (s.turn !== 'me' || s.pendingGuess || s.asked || s.guessing) return;
-  qbSelected = {};
+  qbTrait = null; qbValues = new Set();
   renderQBuilder();
   $('#qbuilder').classList.remove('hidden');
 }
 
 function renderQBuilder() {
   $('#qb-panel').innerHTML = Object.entries(TRAIT_LABELS).map(([key, meta]) => {
-    const sel = qbSelected[key];
+    // Once a section is chosen, the others are locked (one section per question).
+    const locked = qbTrait && qbTrait !== key;
     const chips = Object.entries(meta.values).map(([val, label]) => {
-      const active = sel && sel.has(val);
-      return `<button class="fchip${active ? ' active' : ''}" data-trait="${key}" data-value="${val}">${label}</button>`;
+      const active = qbTrait === key && qbValues.has(val);
+      return `<button class="fchip${active ? ' active' : ''}${locked ? ' off' : ''}" data-trait="${key}" data-value="${val}"${locked ? ' disabled' : ''}>${label}</button>`;
     }).join('');
-    return `<div class="filter-sec"><div class="fs-title">${meta.name}</div><div class="fs-chips">${chips}</div></div>`;
+    return `<div class="filter-sec${locked ? ' locked' : ''}"><div class="fs-title">${meta.name}</div><div class="fs-chips">${chips}</div></div>`;
   }).join('');
-  const feats = qbFeatures();
-  $('#qb-summary').innerHTML = feats.length
-    ? `<b>Your question:</b> ${escapeHTML(buildQuestionText(feats))}`
-    : '<span class="qb-empty">No traits picked yet — or ask out loud in the chat.</span>';
-  $('#qb-send').disabled = feats.length === 0;
+  const q = qbQuestion();
+  $('#qb-summary').innerHTML = q
+    ? `<b>Your question:</b> ${escapeHTML(buildQuestionText(q))}?`
+    : '<span class="qb-empty">Pick one section, then one or more options (they count as “or”). Or just ask out loud in the chat.</span>';
+  $('#qb-send').disabled = !q;
 }
 
-// The opponent answers a structured question (online). Honesty is enforced:
-// clicking the untruthful button warns instead of recording.
-function showAnswerUI(engine, features) {
+// The opponent answers a structured question (online), one yes/no. Honesty is
+// enforced: clicking the untruthful button warns instead of recording.
+function showAnswerUI(engine, question) {
+  if (!question) return;
   const rows = $('#qa-rows');
-  const answered = {};
   $('#qa-title').textContent = `🙋 ${engine.state.oppName || 'Your rival'} asks:`;
-  const render = () => {
-    rows.innerHTML = features.map((f, i) => {
-      const done = i in answered;
-      return `<div class="qa-row ${done ? 'done' : ''}">
-        <div class="qa-q">Does your character have <b>${escapeHTML(featureLabel(f))}</b>?</div>
-        <div class="qa-btns">
-          <button class="btn ${done && answered[i] ? 'primary' : 'ghost'}" data-i="${i}" data-ans="yes" ${done ? 'disabled' : ''}>Yes</button>
-          <button class="btn ${done && !answered[i] ? 'primary' : 'ghost'}" data-i="${i}" data-ans="no" ${done ? 'disabled' : ''}>No</button>
-        </div></div>`;
-    }).join('');
-  };
-  render();
+  rows.innerHTML = `<div class="qa-row">
+    <div class="qa-q">Does your character have <b>${escapeHTML(buildQuestionText(question))}</b>?</div>
+    <div class="qa-btns">
+      <button class="btn ghost" data-ans="yes">Yes</button>
+      <button class="btn ghost" data-ans="no">No</button>
+    </div></div>`;
   $('#qanswer').classList.remove('hidden');
+  const truth = computeTruth(engine.state.mySecret, question);
   rows.onclick = async (ev) => {
     const btn = ev.target.closest('button[data-ans]'); if (!btn) return;
-    const i = Number(btn.dataset.i);
     const said = btn.dataset.ans === 'yes';
-    const truth = computeTruth(engine.state.mySecret, features[i]);
     if (said !== truth) {
       await noticeModal({
         title: '🚫 Answer honestly!',
-        body: `Your character does <b>${truth ? '' : 'not '}</b>have <b>${escapeHTML(featureLabel(features[i]))}</b>. Please answer truthfully.`,
+        body: `Your character <b>${truth ? 'does' : 'does not'}</b> match <b>${escapeHTML(buildQuestionText(question))}</b>. Please answer truthfully.`,
         okText: 'Oops — ok',
       });
       return;
     }
-    answered[i] = said;
-    render();
-    if (Object.keys(answered).length === features.length) {
-      const answers = features.map((f, idx) => ({ ...f, yes: !!answered[idx] }));
-      engine.answerStructured(answers, buildAnswerText(answers));
-      $('#qanswer').classList.add('hidden');
-      rows.onclick = null;
-    }
+    engine.answerStructured(said, buildAnswerText(question, said));
+    $('#qanswer').classList.add('hidden');
+    rows.onclick = null;
   };
 }
 
 // In pass-and-play the opponent isn't looking, so the app answers truthfully
 // from their (the other engine's) secret automatically.
-function autoAnswer(engine, features) {
-  const answers = features.map((f) => ({ ...f, yes: computeTruth(engine.state.mySecret, f) }));
-  engine.answerStructured(answers, buildAnswerText(answers));
+function autoAnswer(engine, question) {
+  if (!question) return;
+  const yes = computeTruth(engine.state.mySecret, question);
+  engine.answerStructured(yes, buildAnswerText(question, yes));
 }
 
 function initQuestionUI() {
   $('#qb-panel').addEventListener('click', (e) => {
-    const btn = e.target.closest('.fchip'); if (!btn) return;
+    const btn = e.target.closest('.fchip'); if (!btn || btn.disabled) return;
     const t = btn.dataset.trait, v = btn.dataset.value;
-    const set = qbSelected[t] || (qbSelected[t] = new Set());
-    if (set.has(v)) set.delete(v); else set.add(v);
-    if (set.size === 0) delete qbSelected[t];
+    if (qbTrait !== t) { qbTrait = t; qbValues = new Set(); }   // switching sections resets
+    if (qbValues.has(v)) qbValues.delete(v); else qbValues.add(v);
+    if (qbValues.size === 0) qbTrait = null;                     // fully cleared → any section
     renderQBuilder();
   });
   $('#qb-cancel').onclick = () => $('#qbuilder').classList.add('hidden');
@@ -791,9 +782,9 @@ function initQuestionUI() {
   };
   $('#qb-send').onclick = () => {
     const e = activeEngine; if (!e) return;
-    const feats = qbFeatures();
-    if (!feats.length) return;
-    if (e.askStructured(feats, buildQuestionText(feats))) {
+    const q = qbQuestion();
+    if (!q) return;
+    if (e.askStructured(q, buildQuestionText(q))) {
       $('#qbuilder').classList.add('hidden');
       toast(G.mode === 'online' ? 'Question sent — waiting for a reply.' : 'Question asked!');
     }

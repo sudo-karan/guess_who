@@ -133,11 +133,13 @@ function glasses(kind) {
     return `<g>${arms}<rect x="30" y="39" width="18" height="16" rx="3" fill="none" stroke="#3a3a44" stroke-width="2.4"/>
       <rect x="52" y="39" width="18" height="16" rx="3" fill="none" stroke="#3a3a44" stroke-width="2.4"/>${bridge}</g>`;
   }
-  // sunglasses
-  return `<g>${arms}<rect x="29" y="40" width="19" height="14" rx="4" fill="#2b2b33"/>
-    <rect x="52" y="40" width="19" height="14" rx="4" fill="#2b2b33"/>
+  // Sunglasses: TINTED but TRANSLUCENT lenses so eye colour still shows through
+  // (the eyes are drawn underneath). Fixes the "sunglasses hide a trait" problem.
+  return `<g>${arms}
+    <rect x="29" y="40" width="19" height="14" rx="4" fill="rgba(40,40,70,0.42)" stroke="#2b2b33" stroke-width="2"/>
+    <rect x="52" y="40" width="19" height="14" rx="4" fill="rgba(40,40,70,0.42)" stroke="#2b2b33" stroke-width="2"/>
     <line x1="48" y1="43" x2="52" y2="43" stroke="#2b2b33" stroke-width="3"/>
-    <path d="M32,43 l5,0 M55,43 l5,0" stroke="#5a5a6a" stroke-width="1.6" stroke-linecap="round"/></g>`;
+    <path d="M32,42 l4,0 M55,42 l4,0" stroke="rgba(255,255,255,0.6)" stroke-width="1.6" stroke-linecap="round"/></g>`;
 }
 
 function facialHair(kind, c) {
@@ -257,7 +259,7 @@ export function renderAvatar(ch, index = 0) {
 const RAW_NAMES = [
   'shilpa', 'karan', 'asif', 'ritu', 'rekha', 'mohit', 'pradeep', 'Jyoti', 'manoj', 'arabind',
   'mansi', 'brajesh', 'Usha', 'alka', 'prajanya', 'nidhi', 'ayush', 'jamal', 'dilip', 'ruchi',
-  'Anjali', 'Richie', 'jannat', 'aafi', 'roodra', 'harshit', 'benisha', 'bhuvik', 'diya', 'baati',
+  'Anjali', 'Richie', 'jannat', 'aafi', 'rudra', 'harshit', 'benisha', 'bhuvik', 'diya', 'baati',
 ];
 export const NAMES = RAW_NAMES.map((n) => n.charAt(0).toUpperCase() + n.slice(1));
 
@@ -324,4 +326,24 @@ export function traitRows(ch) {
     { label: T.beard.name,   value: T.beard.values[ch.beard] },
     { label: T.acc.name,     value: T.acc.values[ch.acc] },
   ];
+}
+
+// An always-visible, compact trait readout shown directly on each card, so every
+// feature is legible at a glance (no need to interpret the drawing or hover).
+// Colour traits get a swatch dot.
+export function renderTraitStrip(ch) {
+  const T = TRAIT_LABELS;
+  const dot = (hex) => `<i class="ts-dot" style="background:${hex}"></i>`;
+  const cell = (k, v, hex) =>
+    `<span class="ts-k">${k}</span><span class="ts-v">${hex ? dot(hex) : ''}${v}</span>`;
+  return `<div class="tstrip">
+    ${cell('Hair', T.hair.values[ch.hair], HAIR[ch.hair])}
+    ${cell('Eyes', T.eye.values[ch.eye], EYE[ch.eye])}
+    ${cell('Style', T.style.values[ch.style])}
+    ${cell('Skin', T.skin.values[ch.skin], SKIN[ch.skin])}
+    ${cell('Specs', T.glasses.values[ch.glasses])}
+    ${cell('Hat', T.hat.values[ch.hat])}
+    ${cell('Beard', T.beard.values[ch.beard])}
+    ${cell('Extra', T.acc.values[ch.acc])}
+  </div>`;
 }
