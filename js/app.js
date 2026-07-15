@@ -3,6 +3,7 @@ import { generateRoster, renderAvatar, TRAIT_LABELS, traitRows } from './charact
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
 import { createLobby, ROOM_STATUS } from './lobby.js';
+import { commonTraitsText, netBatchesByTurnActor } from './loganalysis.js';
 
 // The roster (name → randomised look) for the current match. Regenerated every
 // game; in online play the host generates it and sends it so both sides match.
@@ -89,7 +90,7 @@ function tooltipHTML(ch) {
 function initTooltip() {
   const tip = $('#tooltip');
   document.addEventListener('mousemove', (e) => {
-    const el = e.target.closest('.char, .ms-card, .reveal-card');
+    const el = e.target.closest('.char, .ms-card, .reveal-card, .log-card');
     const ch = el && CHAR_BY_ID[Number(el.dataset.id)];
     if (!ch) { tip.classList.add('hidden'); return; }
     tip.innerHTML = tooltipHTML(ch);
@@ -583,11 +584,9 @@ function renderPlay(s) {
   $('#score-you-name').textContent = s.myName;
   $('#score-opp-name').textContent = s.oppName || 'Rival';
   const open = Object.values(s.deduction).filter(Boolean).length;
-  const closed = Object.values(s.deduction).filter((v) => v === false).length;
+  // "X / 20 active" — how many cards are still standing on each board.
   $('#you-open').textContent = open;
-  $('#you-closed').textContent = closed;
   $('#opp-open').textContent = s.oppOpen;
-  $('#opp-closed').textContent = s.oppClosed;
 
   // A private reminder of your own secret character (only ever your own, and in
   // pass-and-play the opponent has already looked away for your turn).
@@ -610,12 +609,13 @@ function renderPlay(s) {
     if (activeFilters[trait].size === 0) delete activeFilters[trait];
   }
 
-  // Board of the opponent's characters (my deduction surface). Cards are always
-  // clickable — crossing them off is private note-taking allowed any time.
+  // Board of the opponent's characters (my deduction surface). Crossing cards
+  // off is a TURN action now, so off-turn the grid reads as locked.
   const grid = $('#play-grid');
   const guessing = s.guessing && myTurn;
   const filtering = anyFilter();
   grid.classList.toggle('filtering', filtering);
+  grid.classList.toggle('locked', !myTurn);
   grid.innerHTML = (s.oppBoard || []).map((id, i) => {
     const ch = CHAR_BY_ID[id];
     const isClosed = s.deduction[id] === false;
@@ -636,16 +636,19 @@ function updateControls(s) {
   const askBtn = $('#btn-ask');
   const guessBtn = $('#btn-guess');
   const endBtn = $('#btn-endturn');
+  const undoBtn = $('#btn-undo');
   const banner = $('#mode-banner');
   banner.className = 'mode-banner hidden';
   banner.textContent = '';               // don't leave stale banner text behind when hidden
   guessBtn.textContent = '🎯 Make a Guess';
   askBtn.textContent = '💬 Ask a Question';
+  // Undo is available only on my turn, and only if I changed something this turn.
+  if (undoBtn) undoBtn.disabled = !(myTurn && s.turnCardActions && s.turnCardActions.length);
 
   if (!myTurn) {
     askBtn.disabled = true; guessBtn.disabled = true; endBtn.disabled = true;
     if (s.pendingGuess) { banner.textContent = 'Your guess is on its way…'; banner.className = 'mode-banner guess'; }
-    else { banner.textContent = '✍️ Not your turn — but you can still cross cards off as you deduce.'; banner.className = 'mode-banner note'; }
+    else { banner.textContent = '⏳ Not your turn — deducing unlocks when it\'s your turn.'; banner.className = 'mode-banner note'; }
     return;
   }
 
@@ -670,11 +673,46 @@ function updateControls(s) {
   }
 }
 
+// Two-digit local clock time for a log entry.
+function fmtTime(ts) {
+  if (ts == null) return '';
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// A small avatar chip for a card referenced in the log (hover shows full traits).
+function logCardHTML(id) {
+  const ch = CHAR_BY_ID[id];
+  if (!ch) return '';
+  return `<span class="log-card" data-id="${id}">${renderAvatar(ch, id)}<span class="lc-name">${escapeHTML(ch.name)}</span></span>`;
+}
+
+// One activity-log row (my perspective: I see my own card actions in detail but
+// only a per-turn COUNT of the opponent's).
+function logRowHTML(ev, s) {
+  const who = ev.by === 'me' ? 'You' : (s.oppName || 'Rival');
+  const time = fmtTime(ev.ts);
+  let body = '';
+  switch (ev.kind) {
+    case 'chat': body = escapeHTML(ev.text); break;
+    case 'ask': body = ev.outloud ? '🗣️ asked a question out loud' : `🙋 asked: ${escapeHTML(ev.text)}`; break;
+    case 'answer': body = `✅ answered: ${escapeHTML(ev.text)}`; break;
+    case 'card': body = `${ev.action === 'off' ? '🚫 crossed off' : '↩︎ brought back'} ${logCardHTML(ev.cardId)}`; break;
+    case 'oppcards': body = `made ${ev.off} card${ev.off === 1 ? '' : 's'} inactive${ev.on ? ` (and ${ev.on} active again)` : ''}`; break;
+    case 'guess': body = `🎯 guessed ${logCardHTML(ev.cardId)} — ${ev.correct ? 'correct! 🏆' : 'wrong'}`; break;
+    default: return '';
+  }
+  return `<div class="log-row ${ev.by === 'me' ? 'me' : 'opp'}">
+    <span class="lr-meta"><b>${escapeHTML(who)}</b> · ${time}</span>
+    <span class="lr-body">${body}</span></div>`;
+}
+
+// Render the live activity log into the sidebar.
 function renderChat(s) {
-  const log = $('#chat-log');
-  log.innerHTML = s.chat.map((m) =>
-    `<div class="chat-msg ${m.from === 'me' ? 'me' : 'opp'}">${escapeHTML(m.text)}</div>`).join('');
-  log.scrollTop = log.scrollHeight;
+  const el = $('#chat-log');
+  el.innerHTML = (s.log || []).map((ev) => logRowHTML(ev, s)).join('');
+  el.scrollTop = el.scrollHeight;
 }
 function escapeHTML(str) {
   return String(str).replace(/[&<>"']/g, (c) =>
@@ -700,8 +738,11 @@ async function handleBoardClick(id) {
     return;
   }
 
-  // Otherwise a click just crosses the card off (or back on) — your private
-  // notes, allowed any time, even when it isn't your turn.
+  // Otherwise a click crosses the card off (or back on) — a turn action now.
+  if (s.turn !== 'me' || s.pendingGuess) {
+    toast('Hold on — you can only cross cards off on your turn.');
+    return;
+  }
   e.toggleCard(id);
 }
 
@@ -717,6 +758,11 @@ function initPlayControls() {
   });
 
   $('#btn-ask').onclick = () => openQuestionBuilder();
+
+  $('#btn-undo').onclick = () => {
+    const e = activeEngine; if (!e) return;
+    if (e.undoLastCard()) toast('Undid your last cross-off.');
+  };
 
   $('#btn-guess').onclick = () => {
     const e = activeEngine; const s = e.state;
@@ -937,25 +983,83 @@ function showOver(s) {
   if (theirs) cards.push(revealCardHTML(`${s.oppName || 'Rival'}'s secret`, theirs));
   $('#reveal-row').innerHTML = cards.join('');
 
-  // Full chat transcript, labelled with who said what — so you can see who lied.
-  const meName = s.myName || 'You';
-  const oppName = s.oppName || 'Rival';
-  const chatEl = $('#over-chat');
-  if (s.chat && s.chat.length) {
-    const lines = s.chat.map((m) => {
-      const who = m.from === 'me' ? meName : oppName;
-      return `<div class="oc-line ${m.from === 'me' ? 'me' : 'opp'}">
-        <span class="oc-who">${escapeHTML(who)}</span>
-        <span class="oc-text">${escapeHTML(m.text)}</span></div>`;
-    }).join('');
-    chatEl.innerHTML = `<h4 class="oc-title">💬 What was said</h4><div class="oc-log">${lines}</div>`;
-    chatEl.classList.remove('hidden');
-  } else {
-    chatEl.innerHTML = '';
-    chatEl.classList.add('hidden');
-  }
+  // The complete, detailed game log — now visible to BOTH players, turn by turn:
+  // every question/answer/chat/guess with who + time, and each player's crossed-
+  // off cards (with photos) plus the common traits of that turn's batch.
+  renderCompleteLog(s);
 
   showScreen('over');
+}
+
+function overEventLine(e, s) {
+  const name = e.by === 'me' ? (s.myName || 'You') : (s.oppName || 'Rival');
+  const time = fmtTime(e.ts);
+  let body = '';
+  switch (e.kind) {
+    case 'chat': body = escapeHTML(e.text); break;
+    case 'ask': body = e.outloud ? '🗣️ asked a question out loud' : `🙋 asked: ${escapeHTML(e.text)}`; break;
+    case 'answer': body = `✅ answered: ${escapeHTML(e.text)}`; break;
+    case 'guess': body = `🎯 guessed ${logCardHTML(e.cardId)} — ${e.correct ? 'correct 🏆' : 'wrong'}`; break;
+    default: return '';
+  }
+  return `<div class="ol-line ${e.by === 'me' ? 'me' : 'opp'}"><span class="oll-meta"><b>${escapeHTML(name)}</b> · ${time}</span><span class="oll-body">${body}</span></div>`;
+}
+
+function batchBlockHTML(by, name, action, ids) {
+  if (!ids.length) return '';
+  const cards = ids.map((id) => logCardHTML(id)).join('');
+  const chars = ids.map((id) => CHAR_BY_ID[id]).filter(Boolean);
+  const verb = action === 'off' ? '🚫 crossed off' : '↩︎ brought back';
+  const commonLine = ids.length >= 2
+    ? `<div class="olb-common">Common features: <b>${escapeHTML(commonTraitsText(chars))}</b></div>`
+    : '';
+  return `<div class="ol-batch ${by === 'me' ? 'me' : 'opp'}">
+    <div class="olb-head"><b>${escapeHTML(name)}</b> ${verb} ${ids.length} card${ids.length === 1 ? '' : 's'}</div>
+    <div class="olb-cards">${cards}</div>
+    ${commonLine}
+  </div>`;
+}
+
+function renderCompleteLog(s) {
+  const el = $('#over-chat');
+  // Card events (mine, plus the opponent's exchanged at game end); everything else
+  // (chat/ask/answer/guess) is the narrative timeline. `oppcards` count-summaries
+  // are dropped — the detailed opponent batches replace them here.
+  const cardEvents = [
+    ...(s.log || []).filter((e) => e.kind === 'card' && e.by === 'me'),
+    ...(s.oppCardLog || []),
+  ];
+  const nonCard = (s.log || []).filter((e) => e.kind !== 'card' && e.kind !== 'oppcards');
+  if (!cardEvents.length && !nonCard.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
+
+  const nameOf = (by) => by === 'me' ? (s.myName || 'You') : (s.oppName || 'Rival');
+  // Stable actor order (host first) so both players see identical ordering.
+  const actorRank = (by) => (((by === 'me') ? !!s.isHost : !s.isHost) ? 0 : 1);
+
+  // Net card batches per turn per actor (replayed vs turn-start state — a card
+  // crossed off then brought back within a turn nets to nothing, matching the
+  // per-turn count the opponent saw live).
+  const batches = netBatchesByTurnActor(cardEvents);
+
+  // Narrative events, grouped by turn (ordered by ts, host-first on ties).
+  nonCard.sort((a, b) => (a.turn - b.turn) || ((a.ts || 0) - (b.ts || 0)) || (actorRank(a.by) - actorRank(b.by)));
+  const nonCardByTurn = new Map();
+  for (const e of nonCard) { if (!nonCardByTurn.has(e.turn)) nonCardByTurn.set(e.turn, []); nonCardByTurn.get(e.turn).push(e); }
+
+  const turns = [...new Set([...nonCardByTurn.keys(), ...Object.keys(batches).map(Number)])].sort((a, b) => a - b);
+  const turnsHTML = turns.map((turn) => {
+    const lines = (nonCardByTurn.get(turn) || []).map((e) => overEventLine(e, s)).join('');
+    const tb = batches[turn] || {};
+    const batchHTML = Object.keys(tb)
+      .sort((a, b) => actorRank(a) - actorRank(b))
+      .map((by) => batchBlockHTML(by, nameOf(by), 'off', tb[by].off) + batchBlockHTML(by, nameOf(by), 'on', tb[by].on))
+      .join('');
+    if (!lines && !batchHTML) return '';
+    return `<div class="ol-turn"><div class="ol-turn-h">Turn ${turn}</div>${lines}${batchHTML}</div>`;
+  }).join('');
+
+  el.innerHTML = `<h4 class="oc-title">📜 Complete game log</h4><div class="ol-body">${turnsHTML}</div>`;
+  el.classList.remove('hidden');
 }
 function revealCardHTML(label, ch) {
   return `<div class="reveal-card" data-id="${ch.id}"><span class="rc-label">${label}</span>

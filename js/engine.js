@@ -6,6 +6,13 @@
 // The two clients are symmetric: each only ever knows its OWN secret. A guess
 // is validated by the *owner's* client, which replies with the result, so no
 // client can read the opponent's secret from the game state.
+//
+// Activity log: every action (chat, question, answer, card cross-off, guess) is
+// recorded in `state.log` with a timestamp, the turn it happened on, and who did
+// it. During play you see your OWN card actions in detail but only a per-turn
+// COUNT of the opponent's; the full card detail is exchanged only once the game
+// ends (see the `fulllog` message), so both players then see an identical, com-
+// plete transcript.
 
 const BOARD_SIZE = 20;
 const ROSTER_SIZE = 30;
@@ -19,8 +26,10 @@ function emitter() {
   };
 }
 
-export function createEngine({ isHost, myName }) {
+export function createEngine({ isHost, myName, now }) {
   const ev = emitter();
+  // Injectable clock (defaults to wall-clock). Tests pass a deterministic counter.
+  const clock = typeof now === 'function' ? now : () => Date.now();
 
   const state = {
     phase: 'setup',        // 'setup' | 'waiting' | 'play' | 'over'
@@ -45,6 +54,8 @@ export function createEngine({ isHost, myName }) {
     asked: false,          // did I ask a question this turn? (locks guessing)
     guessing: false,       // am I currently in guess-selection mode?
     pendingGuess: false,   // waiting for the opponent to validate my guess
+    pendingGuessTs: null,  // ts stamped on my outbound guess (reused when logging the result)
+    pendingGuessTurn: null,// turn stamped on my outbound guess (reused when logging the result)
 
     // Opponent's deduction progress over MY board (they report counts on End Turn).
     oppOpen: BOARD_SIZE,
@@ -52,16 +63,41 @@ export function createEngine({ isHost, myName }) {
 
     winner: null,          // 'me' | 'opp'
     lastGuess: null,       // { by:'me'|'opp', id, correct }
-    revealed: false,       // have I already sent my secret reveal?
-    chat: [],
+    revealed: false,       // have I already sent my secret reveal + full log?
+
+    chat: [],              // live chat/question/answer feed (kept for the sidebar)
+    log: [],               // full timestamped activity log (my perspective)
+    turnCardActions: [],   // { cardId, action, prev } toggled THIS turn (for undo)
+    turnStartOff: new Set(),   // ids crossed out at the start of my current turn
+    oppCardLog: [],        // opponent's card actions, received only at game end
   };
 
   function change() { ev.emit('change', state); }
   function send(msg) { ev.emit('send', msg); }
   function log(text) { ev.emit('log', text); }
 
-  // End the game, record the outcome, and reveal my secret to the opponent
-  // exactly once so the results screen can show both answers.
+  // Append a timestamped entry to the activity log. `ts` and `turn` are the
+  // ORIGINATOR's, so the same shared event lands at the same time and in the same
+  // round on BOTH clients (their turn counters can otherwise diverge mid-round).
+  function logEvent({ ts, turn, by, kind, text, cardId, action, correct, off, on, outloud }) {
+    state.log.push({
+      ts: ts == null ? clock() : ts,
+      turn: turn == null ? state.turnNumber : turn,
+      by, kind, text, cardId, action, correct, off, on, outloud,
+    });
+  }
+
+  const offIds = () => Object.keys(state.deduction).filter((id) => state.deduction[id] === false).map(Number);
+
+  // Begin (or reset) tracking for MY turn: clear the undo stack and snapshot
+  // which cards were already crossed out, so End Turn can report NET changes.
+  function beginMyTurnTracking() {
+    state.turnCardActions = [];
+    state.turnStartOff = new Set(offIds());
+  }
+
+  // End the game, record the outcome, and reveal my secret + full card log to the
+  // opponent exactly once so the results screen can show an identical transcript.
   function concludeGame(winner, lastGuess) {
     state.winner = winner;
     state.lastGuess = lastGuess;
@@ -70,8 +106,16 @@ export function createEngine({ isHost, myName }) {
     if (!state.revealed) {
       state.revealed = true;
       send({ type: 'reveal', secret: state.mySecret });
+      send({ type: 'fulllog', cards: myCardEvents() });
     }
     change();
+  }
+
+  // My individual card actions across the whole game, for the end-game exchange.
+  function myCardEvents() {
+    return state.log
+      .filter((e) => e.kind === 'card' && e.by === 'me')
+      .map((e) => ({ ts: e.ts, turn: e.turn, cardId: e.cardId, action: e.action }));
   }
 
   // Count of characters still standing on my deduction board.
@@ -103,6 +147,7 @@ export function createEngine({ isHost, myName }) {
     state.turn = (isHost === hostFirst) ? 'me' : 'opp';
     state.asked = false;
     state.guessing = false;
+    if (state.turn === 'me') beginMyTurnTracking();
     change();
   }
 
@@ -140,14 +185,33 @@ export function createEngine({ isHost, myName }) {
 
   const myTurn = () => state.phase === 'play' && state.turn === 'me' && !state.pendingGuess;
 
-  // Cross a character off (or back on) MY deduction board. This is private note-
-  // taking, so it is allowed at ANY time — my turn or not — and never blocks a
-  // future guess. Progress is reported live so the opponent's counter updates.
+  // Cross a character off (or back on) MY deduction board. This is now allowed
+  // ONLY on my turn — deducing is a turn action, logged so I can see precisely
+  // what I crossed off each turn. The opponent learns only a per-turn COUNT (on
+  // End Turn), never which cards, until the game ends.
   function toggleCard(id) {
-    if (state.phase !== 'play') return false;
+    if (!myTurn()) return false;
     if (!(id in state.deduction)) return false;
-    state.deduction[id] = !state.deduction[id];
-    send({ type: 'progress', open: myOpenCount(), closed: myClosedCount() });
+    const prev = state.deduction[id];
+    state.deduction[id] = !prev;
+    const action = state.deduction[id] ? 'on' : 'off';
+    state.turnCardActions.push({ cardId: id, action, prev });
+    logEvent({ by: 'me', kind: 'card', cardId: id, action });
+    change();
+    return true;
+  }
+
+  // Undo the most recent card change made THIS turn (repeatable). Does not touch
+  // earlier turns. Refused when it isn't my turn or nothing was changed.
+  function undoLastCard() {
+    if (!myTurn() || !state.turnCardActions.length) return false;
+    const last = state.turnCardActions.pop();
+    state.deduction[last.cardId] = last.prev;
+    // Remove the matching (most recent) 'card' entry from the log.
+    for (let i = state.log.length - 1; i >= 0; i--) {
+      const e = state.log[i];
+      if (e.kind === 'card' && e.by === 'me' && e.cardId === last.cardId) { state.log.splice(i, 1); break; }
+    }
     change();
     return true;
   }
@@ -157,10 +221,12 @@ export function createEngine({ isHost, myName }) {
   function askQuestion() {
     if (!myTurn() || state.asked || state.guessing) return false;
     state.asked = true;
-    // Leave a transcript trace so an out-loud question shows up in chat + on the
-    // results screen, symmetric with structured questions.
-    state.chat.push({ from: 'me', text: '🗣️ Asked a question out loud' });
-    send({ type: 'ask', name: state.myName });
+    const ts = clock();
+    const text = '🗣️ Asked a question out loud';
+    // Leave a transcript trace so an out-loud question shows up in chat + logs.
+    state.chat.push({ from: 'me', text });
+    logEvent({ ts, by: 'me', kind: 'ask', text: 'Asked a question out loud', outloud: true });
+    send({ type: 'ask', name: state.myName, ts, turn: state.turnNumber });
     change();
     return true;
   }
@@ -173,8 +239,10 @@ export function createEngine({ isHost, myName }) {
     if (!myTurn() || state.asked || state.guessing) return false;
     if (!question || !question.trait || !Array.isArray(question.values) || !question.values.length) return false;
     state.asked = true;
+    const ts = clock();
     state.chat.push({ from: 'me', text: '🙋 ' + (text || 'a question') });
-    send({ type: 'question', question, text: text || '' });
+    logEvent({ ts, by: 'me', kind: 'ask', text: text || 'a question' });
+    send({ type: 'question', question, text: text || '', ts, turn: state.turnNumber });
     change();
     return true;
   }
@@ -182,8 +250,10 @@ export function createEngine({ isHost, myName }) {
   // Answer a structured question with a single yes/no (truth decided UI-side,
   // which owns the roster). `text` is the readable summary.
   function answerStructured(yes, text) {
+    const ts = clock();
     state.chat.push({ from: 'me', text: '✅ ' + (text || '') });
-    send({ type: 'answer', yes: !!yes, text: text || '' });
+    logEvent({ ts, by: 'me', kind: 'answer', text: text || '' });
+    send({ type: 'answer', yes: !!yes, text: text || '', ts, turn: state.turnNumber });
     change();
   }
 
@@ -204,17 +274,23 @@ export function createEngine({ isHost, myName }) {
     if (!myTurn() || state.asked || !state.guessing) return false;
     if (!state.oppBoard || !state.oppBoard.includes(id)) return false;
     state.pendingGuess = true;
-    send({ type: 'guess', id });
+    state.pendingGuessTs = clock();
+    state.pendingGuessTurn = state.turnNumber;
+    send({ type: 'guess', id, ts: state.pendingGuessTs, turn: state.pendingGuessTurn });
     change();
     return true;
   }
 
-  // End my turn.
+  // End my turn. Reports my NET deduction changes this turn (how many I crossed
+  // off / brought back) so the opponent sees a per-turn count.
   function endTurn() {
     if (!myTurn()) return false;
     state.guessing = false;
-    // Report my deduction progress so the opponent can see how close I am.
-    send({ type: 'endTurn', open: myOpenCount(), closed: myClosedCount() });
+    const nowOff = new Set(offIds());
+    let off = 0, on = 0;
+    for (const id of nowOff) if (!state.turnStartOff.has(id)) off += 1;      // newly crossed off
+    for (const id of state.turnStartOff) if (!nowOff.has(id)) on += 1;       // brought back
+    send({ type: 'endTurn', open: myOpenCount(), closed: myClosedCount(), off, on, ts: clock(), turn: state.turnNumber });
     state.turn = 'opp';
     state.turnNumber += 1;
     change();
@@ -224,8 +300,10 @@ export function createEngine({ isHost, myName }) {
   function sendChat(text) {
     const clean = String(text || '').slice(0, 300).trim();
     if (!clean) return;
+    const ts = clock();
     state.chat.push({ from: 'me', text: clean });
-    send({ type: 'chat', text: clean });
+    logEvent({ ts, by: 'me', kind: 'chat', text: clean });
+    send({ type: 'chat', text: clean, ts, turn: state.turnNumber });
     change();
   }
 
@@ -248,12 +326,18 @@ export function createEngine({ isHost, myName }) {
     state.asked = false;
     state.guessing = false;
     state.pendingGuess = false;
+    state.pendingGuessTs = null;
+    state.pendingGuessTurn = null;
     state.oppOpen = BOARD_SIZE;
     state.oppClosed = 0;
     state.winner = null;
     state.lastGuess = null;
     state.revealed = false;
     state.chat = [];
+    state.log = [];
+    state.turnCardActions = [];
+    state.turnStartOff = new Set();
+    state.oppCardLog = [];
     change();
   }
 
@@ -280,25 +364,24 @@ export function createEngine({ isHost, myName }) {
         // Opponent finished their turn; adopt their reported progress + take turn.
         state.oppOpen = Number.isFinite(msg.open) ? msg.open : state.oppOpen;
         state.oppClosed = Number.isFinite(msg.closed) ? msg.closed : state.oppClosed;
+        // Log the per-turn count (not which cards) — skip a no-op turn.
+        if ((msg.off || 0) + (msg.on || 0) > 0) {
+          logEvent({ ts: msg.ts, turn: msg.turn, by: 'opp', kind: 'oppcards', off: msg.off || 0, on: msg.on || 0 });
+        }
         if (state.phase === 'play') {
           state.turn = 'me';
           state.asked = false;      // fresh turn: guessing is available again
           state.guessing = false;
+          beginMyTurnTracking();    // reset undo stack + snapshot for MY new turn
         }
         change();
         break;
       }
-      case 'progress': {
-        // Opponent updated their deduction (they can cross cards off any time).
-        state.oppOpen = Number.isFinite(msg.open) ? msg.open : state.oppOpen;
-        state.oppClosed = Number.isFinite(msg.closed) ? msg.closed : state.oppClosed;
-        change();
-        break;
-      }
       case 'ask': {
-        // Opponent chose to ask a question this turn — surface it so I can answer.
+        // Opponent chose to ask a question out loud — surface it so I can answer.
         const who = msg.name || state.oppName || 'Your rival';
         state.chat.push({ from: 'opp', text: '🗣️ ' + who + ' asked a question out loud' });
+        logEvent({ ts: msg.ts, turn: msg.turn, by: 'opp', kind: 'ask', text: 'Asked a question out loud', outloud: true });
         ev.emit('ask', who);
         change();
         break;
@@ -306,6 +389,7 @@ export function createEngine({ isHost, myName }) {
       case 'question': {
         // Opponent asked a structured question — log it and surface it to answer.
         state.chat.push({ from: 'opp', text: '🙋 ' + (msg.text || 'a question') });
+        logEvent({ ts: msg.ts, turn: msg.turn, by: 'opp', kind: 'ask', text: msg.text || 'a question' });
         ev.emit('question', { question: msg.question || null, text: msg.text || '' });
         change();
         break;
@@ -313,6 +397,7 @@ export function createEngine({ isHost, myName }) {
       case 'answer': {
         // Reply to a structured question I asked.
         state.chat.push({ from: 'opp', text: '✅ ' + (msg.text || '') });
+        logEvent({ ts: msg.ts, turn: msg.turn, by: 'opp', kind: 'answer', text: msg.text || '' });
         ev.emit('answer', { yes: !!msg.yes, text: msg.text || '' });
         change();
         break;
@@ -320,12 +405,15 @@ export function createEngine({ isHost, myName }) {
       case 'guess': {
         // Opponent guessed MY secret. My client is the source of truth.
         const correct = msg.id === state.mySecret;
+        logEvent({ ts: msg.ts, turn: msg.turn, by: 'opp', kind: 'guess', cardId: msg.id, correct });
         send({ type: 'guessResult', id: msg.id, correct });
         concludeGame(correct ? 'opp' : 'me', { by: 'opp', id: msg.id, correct });
         break;
       }
       case 'guessResult': {
-        // Reply to my own guess.
+        // Reply to my own guess — reuse the ts I stamped on the outbound guess so
+        // both clients log the SAME guess at the SAME time.
+        logEvent({ ts: state.pendingGuessTs, turn: state.pendingGuessTurn, by: 'me', kind: 'guess', cardId: msg.id, correct: !!msg.correct });
         concludeGame(msg.correct ? 'me' : 'opp', { by: 'me', id: msg.id, correct: !!msg.correct });
         break;
       }
@@ -334,8 +422,19 @@ export function createEngine({ isHost, myName }) {
         change();
         break;
       }
+      case 'fulllog': {
+        // The full card history the opponent kept privately during the game —
+        // arrives around game-over (possibly just after) so the complete log can
+        // be shown to both. Tolerate arrival while already on the over screen.
+        state.oppCardLog = (Array.isArray(msg.cards) ? msg.cards : [])
+          .map((c) => ({ ts: c.ts, turn: c.turn, cardId: c.cardId, action: c.action, by: 'opp', kind: 'card' }));
+        change();
+        break;
+      }
       case 'chat': {
-        state.chat.push({ from: 'opp', text: String(msg.text || '').slice(0, 300) });
+        const text = String(msg.text || '').slice(0, 300);
+        state.chat.push({ from: 'opp', text });
+        logEvent({ ts: msg.ts, turn: msg.turn, by: 'opp', kind: 'chat', text });
         change();
         break;
       }
@@ -360,7 +459,7 @@ export function createEngine({ isHost, myName }) {
     // setup
     setupLocal,
     // play actions
-    toggleCard, askQuestion, askStructured, answerStructured,
+    toggleCard, undoLastCard, askQuestion, askStructured, answerStructured,
     beginGuess, cancelGuess, makeGuess, endTurn,
     sendChat, requestRematch,
     // networking

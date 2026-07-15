@@ -129,11 +129,11 @@
         <div class="scoreboard">
           <div class="score you">
             <span class="score-name" id="score-you-name">You</span>
-            <span class="score-nums"><b id="you-open">20</b> open · <b id="you-closed">0</b> out</span>
+            <span class="score-nums"><b id="you-open">20</b> / 20 active</span>
           </div>
           <div class="score opp">
             <span class="score-name" id="score-opp-name">Rival</span>
-            <span class="score-nums"><b id="opp-open">20</b> open · <b id="opp-closed">0</b> out</span>
+            <span class="score-nums"><b id="opp-open">20</b> / 20 active</span>
           </div>
         </div>
       </header>
@@ -157,10 +157,10 @@
             <div id="my-secret" class="my-secret"></div>
           </div>
           <div class="side-block chat-block">
-            <h4>Ask a question 💬</h4>
+            <h4>Activity log 📜</h4>
             <div id="chat-log" class="chat-log"></div>
             <form id="chat-form" class="chat-form">
-              <input id="chat-input" maxlength="200" placeholder="Do they wear glasses?" autocomplete="off" />
+              <input id="chat-input" maxlength="200" placeholder="Say something / ask out loud…" autocomplete="off" />
               <button class="btn tiny primary" type="submit">Send</button>
             </form>
           </div>
@@ -168,6 +168,7 @@
       </div>
 
       <footer class="controls">
+        <button class="btn ghost" id="btn-undo" disabled>↩︎ Undo</button>
         <button class="btn ask" id="btn-ask">💬 Ask a Question</button>
         <button class="btn danger" id="btn-guess">🎯 Make a Guess</button>
         <button class="btn primary" id="btn-endturn">End Turn →</button>
