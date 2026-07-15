@@ -89,6 +89,14 @@ test('asking a question notifies the opponent', () => {
   assert.equal(notified, 'A');
 });
 
+test('asking out loud leaves a chat trace on both sides', () => {
+  const { A, B } = pair();
+  setupBoth(A, B);
+  A.askQuestion();
+  assert.ok(A.state.chat.some((m) => m.from === 'me' && /out loud/i.test(m.text)), 'asker sees their own trace');
+  assert.ok(B.state.chat.some((m) => m.from === 'opp' && /out loud/i.test(m.text)), 'opponent sees the ask in chat');
+});
+
 test('the ask-lock clears on your next turn', () => {
   const { A, B } = pair();
   setupBoth(A, B);

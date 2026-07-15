@@ -157,6 +157,9 @@ export function createEngine({ isHost, myName }) {
   function askQuestion() {
     if (!myTurn() || state.asked || state.guessing) return false;
     state.asked = true;
+    // Leave a transcript trace so an out-loud question shows up in chat + on the
+    // results screen, symmetric with structured questions.
+    state.chat.push({ from: 'me', text: '🗣️ Asked a question out loud' });
     send({ type: 'ask', name: state.myName });
     change();
     return true;
@@ -294,7 +297,10 @@ export function createEngine({ isHost, myName }) {
       }
       case 'ask': {
         // Opponent chose to ask a question this turn — surface it so I can answer.
-        ev.emit('ask', msg.name || state.oppName || 'Your rival');
+        const who = msg.name || state.oppName || 'Your rival';
+        state.chat.push({ from: 'opp', text: '🗣️ ' + who + ' asked a question out loud' });
+        ev.emit('ask', who);
+        change();
         break;
       }
       case 'question': {
