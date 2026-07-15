@@ -108,6 +108,23 @@ body {
 .net-status.error { color: var(--red); }
 .net-status.ok { color: var(--green); }
 
+/* ---- room browser ---- */
+.room-browser { margin-top: 20px; border-top: 2px dashed var(--line); padding-top: 16px; }
+.rb-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.rb-head h3 { margin: 0; }
+.room-list { display: flex; flex-direction: column; gap: 10px; max-height: 260px; overflow-y: auto; }
+.rb-empty { color: var(--ink-soft); text-align: center; margin: 8px 0; font-weight: 600; }
+.room-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--card); border: 2px solid var(--line); border-radius: 14px;
+  padding: 10px 14px; box-shadow: var(--shadow-sm);
+}
+.rc-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rc-host { font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rb-chip { font-size: 0.72rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+.rb-chip.open { background: rgba(55, 214, 122, 0.18); color: #1c9e56; }
+.rb-chip.playing { background: rgba(255, 210, 63, 0.22); color: #a9820a; }
+
 .rules { line-height: 1.6; color: var(--ink); }
 .rules ul { margin: 6px 0; }
 

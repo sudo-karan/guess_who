@@ -2,6 +2,7 @@
 import { generateRoster, renderAvatar, TRAIT_LABELS, traitRows } from './characters.js';
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
+import { createLobby, ROOM_STATUS } from './lobby.js';
 
 // The roster (name → randomised look) for the current match. Regenerated every
 // game; in online play the host generates it and sends it so both sides match.
@@ -112,6 +113,8 @@ const G = {
   A: null, B: null,    // local engines
 };
 let activeEngine = null;   // engine the play/over UI currently reflects
+let lobby = null;          // serverless room-discovery client (online only)
+let hostedRoom = null;     // the code of the room THIS browser is hosting, if any
 // Highlight filters (UI-only). Multi-select: { traitKey: Set(values) }.
 // A card lights up when it matches EVERY active section (AND across sections),
 // matching ANY selected value within a section (OR within a section).
@@ -131,6 +134,8 @@ function initHome() {
     if (!peerAvailable()) toast('Online needs a connection — you can still Pass & Play.');
     $('#online-panel').classList.toggle('hidden');
     $('#how-panel').classList.add('hidden');
+    // Start room discovery the moment the online panel is opened.
+    if (!$('#online-panel').classList.contains('hidden')) ensureLobby();
   };
   $('#btn-how').onclick = () => {
     $('#how-panel').classList.toggle('hidden');
@@ -143,6 +148,13 @@ function initHome() {
   $('#btn-host').onclick = () => hostOnline();
   $('#btn-join').onclick = () => joinOnline();
   $('#join-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinOnline(); });
+
+  // Room browser: refresh + "request to join" a listed room.
+  $('#btn-refresh-rooms').onclick = () => ensureLobby();
+  $('#room-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('.rb-join');
+    if (btn && btn.dataset.code) joinOnline(btn.dataset.code);
+  });
   $('#btn-copy').onclick = () => {
     const code = $('#code-value').textContent;
     navigator.clipboard && navigator.clipboard.writeText(code).then(
@@ -153,6 +165,75 @@ function initHome() {
 function setNetStatus(msg, kind = '') {
   const el = $('#net-status');
   el.textContent = msg; el.className = 'net-status ' + kind;
+}
+
+/* ------------------------------ lobby ------------------------------- */
+// Start (or refresh) serverless room discovery. Populates the room browser.
+function ensureLobby() {
+  if (lobby) { lobby.refresh(); return; }
+  if (!peerAvailable()) {
+    renderRoomsMessage('Online room discovery needs an internet connection. You can still Pass & Play.');
+    return;
+  }
+  lobby = createLobby({ onRooms: renderRooms, onStatus: onLobbyStatus });
+  lobby.start();
+  lobby.refresh();
+}
+
+function onLobbyStatus(kind) {
+  // Only surface a message while the list is still empty, so we don't stomp on
+  // a populated list once rooms come in.
+  const el = $('#room-list');
+  if (!el || el.querySelector('.room-card')) return;
+  if (kind === 'reconnecting') renderRoomsMessage('Reconnecting to the room list…');
+  else if (kind === 'error') renderRoomsMessage('Couldn\'t reach the room list right now — hosting and joining by code still work.');
+}
+
+function renderRoomsMessage(msg) {
+  const el = $('#room-list');
+  if (el) el.innerHTML = `<p class="rb-empty">${escapeHTML(msg)}</p>`;
+}
+
+// Render the live list of rooms (excluding ended rooms and our own).
+function renderRooms(rooms) {
+  const el = $('#room-list');
+  if (!el) return;
+  const shown = (rooms || []).filter((r) => r.status !== ROOM_STATUS.ENDED && r.code !== hostedRoom);
+  if (!shown.length) {
+    renderRoomsMessage('No open rooms yet — host one above and share the code, or wait for a friend to appear here.');
+    return;
+  }
+  el.innerHTML = shown.map((r) => {
+    const joinable = r.status === ROOM_STATUS.OPEN;
+    const chip = joinable
+      ? '<span class="rb-chip open">Open</span>'
+      : '<span class="rb-chip playing">In game</span>';
+    return `<div class="room-card">
+      <div class="rc-info"><span class="rc-host">${escapeHTML(r.hostName)}'s room</span>${chip}</div>
+      ${joinable
+        ? `<button class="btn tiny primary rb-join" data-code="${escapeHTML(r.code)}">Request to join</button>`
+        : '<button class="btn tiny" disabled>Game in progress</button>'}
+    </div>`;
+  }).join('');
+}
+
+// Host: a guest is asking to join — approve or decline.
+async function showJoinApproval(who, ctl) {
+  const ok = await confirmModal({
+    title: '🙋 Join request',
+    body: `<b>${escapeHTML(who)}</b> wants to join your room. Let them in?`,
+    okText: 'Approve', cancelText: 'Decline',
+  });
+  if (ok) ctl.accept(); else ctl.deny();
+}
+
+// Mark this browser's hosted room as finished and drop it from the lobby.
+function endHostedRoom() {
+  if (lobby && hostedRoom) {
+    lobby.setStatus(hostedRoom, ROOM_STATUS.ENDED);
+    lobby.unpublish(hostedRoom);
+  }
+  hostedRoom = null;
 }
 
 /* ------------------------------ online ------------------------------ */
@@ -190,13 +271,16 @@ function onOnlineMessage(m, engine) {
 }
 
 function hostOnline() {
+  const name = ($('#online-name').value || '').trim().slice(0, 14) || 'Player 1';
   G.mode = 'online';
   G.channel = createOnlineChannel();
   const engine = makeOnlineEngine(true);
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
+  G.channel.onJoinRequest((who, ctl) => showJoinApproval(who, ctl));
   G.channel.onOpen(() => {
     setNetStatus('Opponent connected!', 'ok');
+    if (lobby && hostedRoom) lobby.setStatus(hostedRoom, ROOM_STATUS.PLAYING);  // room now in-game
     const roster = generateRoster();          // host is authoritative for the cast
     setRoster(roster);
     G.channel.send({ type: 'roster', roster });
@@ -206,12 +290,20 @@ function hostOnline() {
   G.channel.host((code) => {
     $('#host-code').classList.remove('hidden');
     $('#code-value').textContent = code;
+    // Advertise the room so friends can find it in the browser.
+    ensureLobby();
+    hostedRoom = code;
+    if (lobby) lobby.publish({ code, hostName: name, status: ROOM_STATUS.OPEN });
   });
 }
 
-function joinOnline() {
-  const code = $('#join-code').value.trim();
+function joinOnline(codeArg) {
+  const code = String(codeArg || $('#join-code').value).trim();
   if (!code) { setNetStatus('Enter a room code first.', 'error'); return; }
+  const name = ($('#online-name').value || '').trim().slice(0, 14) || 'Player 2';
+  // Drop any half-open channel left over from a declined/failed attempt so a
+  // fresh join doesn't race an old peer.
+  if (G.channel) { try { G.channel.close(); } catch (_) {} G.channel = null; }
   G.mode = 'online';
   G.channel = createOnlineChannel();
   const engine = makeOnlineEngine(false);
@@ -219,7 +311,7 @@ function joinOnline() {
   G.channel.onStatus((s) => setNetStatus(s));
   G.channel.onOpen(() => setNetStatus('Connected! Dealing the characters…', 'ok'));
   G.channel.onError(handleNetError);
-  G.channel.join(code);
+  G.channel.join(code, name);
 }
 
 // Route online state changes to the right screen.
@@ -260,6 +352,7 @@ function handleNetError(e) {
 }
 
 function showDisconnected() {
+  endHostedRoom();                       // room can't continue — drop it from the lobby
   $('#over-emoji').textContent = '🔌';
   $('#over-title').textContent = 'Opponent left';
   $('#over-title').style.color = 'var(--ink)';
@@ -545,6 +638,7 @@ function updateControls(s) {
   const endBtn = $('#btn-endturn');
   const banner = $('#mode-banner');
   banner.className = 'mode-banner hidden';
+  banner.textContent = '';               // don't leave stale banner text behind when hidden
   guessBtn.textContent = '🎯 Make a Guess';
   askBtn.textContent = '💬 Ask a Question';
 
@@ -773,10 +867,19 @@ function initQuestionUI() {
     renderQBuilder();
   });
   $('#qb-cancel').onclick = () => $('#qbuilder').classList.add('hidden');
-  $('#qb-outloud').onclick = () => {
-    $('#qbuilder').classList.add('hidden');
+  $('#qb-outloud').onclick = async () => {
     const e = activeEngine;
-    if (e && e.askQuestion()) toast('Question asked out loud — cross off who doesn\'t fit, then End Turn.');
+    if (!e) return;
+    // Asking commits you to NOT guessing this turn and can't be undone, so make
+    // sure it wasn't an accidental tap before locking the turn.
+    $('#qbuilder').classList.add('hidden');
+    const ok = await confirmModal({
+      title: '🗣️ Ask out loud?',
+      body: 'Say your question to your opponent out loud (or type it in the chat). Heads up — asking uses your turn, so <b>you won\'t be able to guess until next turn</b>.',
+      okText: 'Yes, ask', cancelText: 'Back',
+    });
+    if (!ok) { $('#qbuilder').classList.remove('hidden'); return; }   // back out — builder reopens
+    if (e.askQuestion()) toast('Question asked out loud — cross off who doesn\'t fit, then End Turn.');
   };
   $('#qb-send').onclick = () => {
     const e = activeEngine; if (!e) return;
@@ -791,6 +894,7 @@ function initQuestionUI() {
 
 /* ------------------------------- over ------------------------------- */
 function showOver(s) {
+  endHostedRoom();                       // the match is finished — mark the room ended
   // Restore the rematch button (a prior disconnect screen may have hidden/disabled it).
   $('#btn-rematch').classList.remove('hidden');
   $('#btn-rematch').disabled = false;
