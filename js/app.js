@@ -51,6 +51,25 @@ function confirmModal({ title, body, okText = 'Confirm', cancelText = 'Cancel' }
   });
 }
 
+// Notice modal: a single OK button, for one-way alerts (e.g. "X is asking…").
+function noticeModal({ title, body, okText = 'OK' }) {
+  return new Promise((resolve) => {
+    $('#modal-title').textContent = title;
+    $('#modal-body').innerHTML = body;
+    $('#modal-ok').textContent = okText;
+    const cancel = $('#modal-cancel');
+    cancel.style.display = 'none';
+    const overlay = $('#modal');
+    overlay.classList.remove('hidden');
+    $('#modal-ok').onclick = () => {
+      overlay.classList.add('hidden');
+      $('#modal-ok').onclick = null;
+      cancel.style.display = '';   // restore for future confirm modals
+      resolve(true);
+    };
+  });
+}
+
 function charCardHTML(ch, idx, extraClass = '') {
   return `<div class="char ${extraClass}" data-id="${ch.id}">
     ${renderAvatar(ch, idx)}<span class="cname">${ch.name}</span>
@@ -143,6 +162,11 @@ function makeOnlineEngine(isHost) {
   engine.on('send', (m) => G.channel.send(m));
   engine.on('log', (t) => toast(t));
   engine.on('change', (s) => routeOnline(s));
+  engine.on('ask', (who) => noticeModal({
+    title: `💬 ${who} is asking a question`,
+    body: `<b>${escapeHTML(who)}</b> chose to ask a question this turn. Answer them (use the chat if you like) — they can't guess this turn.`,
+    okText: 'Got it',
+  }));
   activeEngine = engine;
   return engine;
 }
@@ -478,9 +502,10 @@ function renderPlay(s) {
     if (activeFilters[trait].size === 0) delete activeFilters[trait];
   }
 
-  // Board of the opponent's characters (my deduction surface).
+  // Board of the opponent's characters (my deduction surface). Cards are always
+  // clickable — crossing them off is private note-taking allowed any time.
   const grid = $('#play-grid');
-  const guessing = s.turnMode === 'guess' && myTurn;
+  const guessing = s.guessing && myTurn;
   const filtering = anyFilter();
   grid.classList.toggle('filtering', filtering);
   grid.innerHTML = (s.oppBoard || []).map((id, i) => {
@@ -490,7 +515,6 @@ function renderPlay(s) {
     if (isClosed) extra += ' closed';
     if (guessing && !isClosed) extra += ' guessable';
     if (filtering && !isClosed && cardMatchesFilters(ch)) extra += ' lit';
-    if (!myTurn) extra += ' disabled-cursor';
     return charCardHTML(ch, i, extra.trim());
   }).join('');
 
@@ -501,30 +525,38 @@ function renderPlay(s) {
 
 function updateControls(s) {
   const myTurn = s.turn === 'me' && !s.pendingGuess && s.phase === 'play';
+  const askBtn = $('#btn-ask');
   const guessBtn = $('#btn-guess');
   const endBtn = $('#btn-endturn');
   const banner = $('#mode-banner');
   banner.className = 'mode-banner hidden';
+  guessBtn.textContent = '🎯 Make a Guess';
+  askBtn.textContent = '💬 Ask a Question';
 
   if (!myTurn) {
-    guessBtn.disabled = true; endBtn.disabled = true;
-    guessBtn.textContent = '🎯 Make a Guess';
+    askBtn.disabled = true; guessBtn.disabled = true; endBtn.disabled = true;
     if (s.pendingGuess) { banner.textContent = 'Your guess is on its way…'; banner.className = 'mode-banner guess'; }
+    else { banner.textContent = '✍️ Not your turn — but you can still cross cards off as you deduce.'; banner.className = 'mode-banner note'; }
     return;
   }
 
-  if (s.turnMode === 'guess') {
+  if (s.guessing) {
+    // In guess-selection mode: tap a card to guess, or cancel.
+    askBtn.disabled = true;
     guessBtn.disabled = false; guessBtn.textContent = '✖ Cancel guess';
-    endBtn.disabled = false;   // you can still end your turn without guessing
-    banner.textContent = '🎯 Guess mode — tap your rival\'s secret, or End Turn to keep deducing.';
-    banner.className = 'mode-banner guess';
-  } else if (s.turnMode === 'disable') {
-    guessBtn.disabled = true; guessBtn.textContent = '🚫 Guessing locked';
     endBtn.disabled = false;
-    banner.textContent = '🚫 Disable mode — cross out who doesn\'t fit, then End Turn. (No guessing this turn.)';
-    banner.className = 'mode-banner disable';
+    banner.textContent = '🎯 Guess mode — tap your rival\'s secret, or Cancel to keep deducing.';
+    banner.className = 'mode-banner guess';
+  } else if (s.asked) {
+    // Asked a question this turn → guessing is locked until next turn.
+    askBtn.disabled = true; askBtn.textContent = '💬 Question asked';
+    guessBtn.disabled = true;
+    endBtn.disabled = false;
+    banner.textContent = '💬 You asked a question — no guessing this turn. Cross off who doesn\'t fit, then End Turn.';
+    banner.className = 'mode-banner ask';
   } else {
-    guessBtn.disabled = false; guessBtn.textContent = '🎯 Make a Guess';
+    askBtn.disabled = false;
+    guessBtn.disabled = false;
     endBtn.disabled = false;
   }
 }
@@ -544,9 +576,10 @@ function escapeHTML(str) {
 async function handleBoardClick(id) {
   const e = activeEngine; if (!e) return;
   const s = e.state;
-  if (s.phase !== 'play' || s.turn !== 'me' || s.pendingGuess) return;
+  if (s.phase !== 'play') return;
 
-  if (s.turnMode === 'guess') {
+  // Guess-selection mode (only on my turn): tap a card to guess it.
+  if (s.guessing && s.turn === 'me' && !s.pendingGuess) {
     if (s.deduction[id] === false) { toast('That one is crossed out — pick an open card.'); return; }
     const ch = CHAR_BY_ID[id];
     const ok = await confirmModal({
@@ -558,15 +591,9 @@ async function handleBoardClick(id) {
     return;
   }
 
-  if (s.turnMode === 'disable') { e.toggleCard(id); return; }
-
-  // turnMode is null → this click means "start disabling". Confirm first.
-  const ok = await confirmModal({
-    title: 'Start crossing out?',
-    body: 'Once you cross out a card this turn, you <b>can\'t make a guess</b> until your next turn.<br>Ready to disable?',
-    okText: 'Yes, let\'s disable', cancelText: 'Cancel',
-  });
-  if (ok) { e.beginDisable(); e.toggleCard(id); }
+  // Otherwise a click just crosses the card off (or back on) — your private
+  // notes, allowed any time, even when it isn't your turn.
+  e.toggleCard(id);
 }
 
 // In local mode, message passing is synchronous — check for game over right away.
@@ -580,18 +607,31 @@ function initPlayControls() {
     handleBoardClick(Number(el.dataset.id));
   });
 
+  $('#btn-ask').onclick = async () => {
+    const e = activeEngine; const s = e.state;
+    if (s.turn !== 'me' || s.pendingGuess || s.asked || s.guessing) return;
+    const ok = await confirmModal({
+      title: 'Ask a question?',
+      body: 'Ask your rival one yes/no question this turn. Heads up: once you ask, you <b>can\'t guess</b> until your next turn.',
+      okText: 'Yes, ask away', cancelText: 'Never mind',
+    });
+    if (!ok) return;
+    e.askQuestion();
+    toast('Question asked — cross off who doesn\'t fit, then End Turn.');
+  };
+
   $('#btn-guess').onclick = () => {
     const e = activeEngine; const s = e.state;
     if (s.turn !== 'me' || s.pendingGuess) return;
-    if (s.turnMode === 'guess') { e.cancelGuess(); return; }
-    if (s.turnMode === 'disable') { toast('You chose to disable this turn — no guessing now.'); return; }
+    if (s.guessing) { e.cancelGuess(); return; }
+    if (s.asked) { toast('You asked a question this turn — no guessing now.'); return; }
     e.beginGuess();
   };
 
   $('#btn-endturn').onclick = () => {
     const e = activeEngine; const s = e.state;
     if (s.turn !== 'me' || s.pendingGuess) return;
-    if (s.turnMode === 'guess') e.cancelGuess();   // back out of an un-made guess, then pass
+    if (s.guessing) e.cancelGuess();   // back out of an un-made guess, then pass
     const ended = e.endTurn();
     if (!ended) return;
     if (G.mode === 'local') {
@@ -657,6 +697,24 @@ function showOver(s) {
   if (mine) cards.push(revealCardHTML('Your secret', mine));
   if (theirs) cards.push(revealCardHTML(`${s.oppName || 'Rival'}'s secret`, theirs));
   $('#reveal-row').innerHTML = cards.join('');
+
+  // Full chat transcript, labelled with who said what — so you can see who lied.
+  const meName = s.myName || 'You';
+  const oppName = s.oppName || 'Rival';
+  const chatEl = $('#over-chat');
+  if (s.chat && s.chat.length) {
+    const lines = s.chat.map((m) => {
+      const who = m.from === 'me' ? meName : oppName;
+      return `<div class="oc-line ${m.from === 'me' ? 'me' : 'opp'}">
+        <span class="oc-who">${escapeHTML(who)}</span>
+        <span class="oc-text">${escapeHTML(m.text)}</span></div>`;
+    }).join('');
+    chatEl.innerHTML = `<h4 class="oc-title">💬 What was said</h4><div class="oc-log">${lines}</div>`;
+    chatEl.classList.remove('hidden');
+  } else {
+    chatEl.innerHTML = '';
+    chatEl.classList.add('hidden');
+  }
 
   showScreen('over');
 }

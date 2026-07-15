@@ -42,7 +42,8 @@ export function createEngine({ isHost, myName }) {
     // Turn state.
     turn: null,            // 'me' | 'opp'
     turnNumber: 0,
-    turnMode: null,        // null (undecided) | 'disable' | 'guess'
+    asked: false,          // did I ask a question this turn? (locks guessing)
+    guessing: false,       // am I currently in guess-selection mode?
     pendingGuess: false,   // waiting for the opponent to validate my guess
 
     // Opponent's deduction progress over MY board (they report counts on End Turn).
@@ -100,7 +101,8 @@ export function createEngine({ isHost, myName }) {
     // `first` is expressed from the host's perspective.
     const hostFirst = first === 'host';
     state.turn = (isHost === hostFirst) ? 'me' : 'opp';
-    state.turnMode = null;
+    state.asked = false;
+    state.guessing = false;
     change();
   }
 
@@ -138,45 +140,43 @@ export function createEngine({ isHost, myName }) {
 
   const myTurn = () => state.phase === 'play' && state.turn === 'me' && !state.pendingGuess;
 
-  // Enter "disable" mode for this turn (UI confirms first). Locks out guessing.
-  function beginDisable() {
-    if (!myTurn()) return false;
-    if (state.turnMode === 'guess') return false;
-    state.turnMode = 'disable';
-    change();
-    return true;
-  }
-
-  // Toggle a character on my deduction board (only in disable mode).
+  // Cross a character off (or back on) MY deduction board. This is private note-
+  // taking, so it is allowed at ANY time — my turn or not — and never blocks a
+  // future guess. Progress is reported live so the opponent's counter updates.
   function toggleCard(id) {
-    if (!myTurn() || state.turnMode !== 'disable') return false;
+    if (state.phase !== 'play') return false;
     if (!(id in state.deduction)) return false;
     state.deduction[id] = !state.deduction[id];
+    send({ type: 'progress', open: myOpenCount(), closed: myClosedCount() });
     change();
     return true;
   }
 
-  // Enter "guess" mode. Refused if the player already started disabling.
+  // Ask a question this turn. This is what commits you to NOT guessing this turn
+  // (you chose to gather info instead). The opponent is notified.
+  function askQuestion() {
+    if (!myTurn() || state.asked || state.guessing) return false;
+    state.asked = true;
+    send({ type: 'ask', name: state.myName });
+    change();
+    return true;
+  }
+
+  // Enter "guess" selection mode. Refused once you've asked a question this turn.
   function beginGuess() {
-    if (!myTurn()) return false;
-    if (state.turnMode === 'disable') return false;
-    state.turnMode = 'guess';
+    if (!myTurn() || state.asked) return false;
+    state.guessing = true;
     change();
     return true;
   }
 
-  // Back out of a chosen mode while nothing has happened yet is not allowed once
-  // committed; but before committing (turnMode null) there is nothing to cancel.
   function cancelGuess() {
-    if (state.turnMode === 'guess' && myTurn()) {
-      state.turnMode = null;
-      change();
-    }
+    if (state.guessing) { state.guessing = false; change(); }
   }
 
   // Commit a guess of the opponent's secret. Terminal action.
   function makeGuess(id) {
-    if (!myTurn() || state.turnMode !== 'guess') return false;
+    if (!myTurn() || state.asked || !state.guessing) return false;
     if (!state.oppBoard || !state.oppBoard.includes(id)) return false;
     state.pendingGuess = true;
     send({ type: 'guess', id });
@@ -184,14 +184,13 @@ export function createEngine({ isHost, myName }) {
     return true;
   }
 
-  // End my turn (only valid on the disable path or an untouched turn).
+  // End my turn.
   function endTurn() {
     if (!myTurn()) return false;
-    if (state.turnMode === 'guess') return false; // must guess or cancel first
+    state.guessing = false;
     // Report my deduction progress so the opponent can see how close I am.
     send({ type: 'endTurn', open: myOpenCount(), closed: myClosedCount() });
     state.turn = 'opp';
-    state.turnMode = null;
     state.turnNumber += 1;
     change();
     return true;
@@ -221,7 +220,8 @@ export function createEngine({ isHost, myName }) {
     state.deduction = {};
     state.turn = null;
     state.turnNumber = 0;
-    state.turnMode = null;
+    state.asked = false;
+    state.guessing = false;
     state.pendingGuess = false;
     state.oppOpen = BOARD_SIZE;
     state.oppClosed = 0;
@@ -257,9 +257,22 @@ export function createEngine({ isHost, myName }) {
         state.oppClosed = Number.isFinite(msg.closed) ? msg.closed : state.oppClosed;
         if (state.phase === 'play') {
           state.turn = 'me';
-          state.turnMode = null;
+          state.asked = false;      // fresh turn: guessing is available again
+          state.guessing = false;
         }
         change();
+        break;
+      }
+      case 'progress': {
+        // Opponent updated their deduction (they can cross cards off any time).
+        state.oppOpen = Number.isFinite(msg.open) ? msg.open : state.oppOpen;
+        state.oppClosed = Number.isFinite(msg.closed) ? msg.closed : state.oppClosed;
+        change();
+        break;
+      }
+      case 'ask': {
+        // Opponent chose to ask a question this turn — surface it so I can answer.
+        ev.emit('ask', msg.name || state.oppName || 'Your rival');
         break;
       }
       case 'guess': {
@@ -305,7 +318,7 @@ export function createEngine({ isHost, myName }) {
     // setup
     setupLocal,
     // play actions
-    beginDisable, toggleCard, beginGuess, cancelGuess, makeGuess, endTurn,
+    toggleCard, askQuestion, beginGuess, cancelGuess, makeGuess, endTurn,
     sendChat, requestRematch,
     // networking
     handleMessage,

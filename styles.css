@@ -212,6 +212,11 @@ body {
 }
 .mode-banner.disable { background: #fff0f4; color: var(--pink); border: 2px dashed var(--pink); }
 .mode-banner.guess { background: #fff5f5; color: var(--red); border: 2px dashed var(--red); }
+.mode-banner.ask { background: #e6fbf8; color: #0c9c8e; border: 2px dashed var(--teal); }
+.mode-banner.note { background: #f3f0ff; color: var(--purple); border: 2px dashed var(--purple); }
+
+/* Ask-a-question button */
+.btn.ask { background: var(--teal); color: #fff; border-bottom-color: #0fb5a5; }
 
 .play-body { display: grid; grid-template-columns: 250px 1fr 280px; gap: 18px; align-items: start; }
 .board-wrap { background: var(--card); border-radius: var(--radius); padding: 14px; box-shadow: var(--shadow-sm); }
@@ -294,6 +299,25 @@ body {
 .reveal-card .rc-label { display: block; font-size: 0.8rem; color: var(--ink-soft); margin-bottom: 6px; font-weight: 700; }
 .reveal-card .rc-name { display: block; font-weight: 800; margin-top: 4px; }
 .over-actions { display: flex; gap: 12px; justify-content: center; }
+
+/* chat transcript on the results screen */
+.over-chat { margin: 4px 0 22px; text-align: left; }
+.oc-title { margin: 0 0 8px; text-align: center; font-size: 1rem; }
+.oc-log {
+  max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+}
+.oc-line { display: flex; flex-direction: column; gap: 1px; font-size: 0.9rem; max-width: 85%; }
+.oc-line.me { align-self: flex-end; text-align: right; }
+.oc-line.opp { align-self: flex-start; }
+.oc-who { font-size: 0.72rem; font-weight: 800; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.4px; }
+.oc-line.me .oc-who { color: var(--purple); }
+.oc-line.opp .oc-who { color: var(--pink); }
+.oc-text {
+  background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px;
+  display: inline-block;
+}
+.oc-line.me .oc-text { background: var(--purple); color: #fff; border-color: var(--purple); }
 
 /* ------------------------------ modal ------------------------------- */
 .modal-overlay {

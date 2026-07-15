@@ -51,38 +51,56 @@ test('both setups begin play with host first', () => {
   assert.equal(B.state.oppName, 'A');
 });
 
-test('cannot act out of turn', () => {
+test('cannot ask/guess/end out of turn, but may take private notes', () => {
   const { A, B } = pair();
   setupBoth(A, B);
-  assert.equal(B.beginDisable(), false);   // not B's turn
+  assert.equal(B.askQuestion(), false);   // not B's turn
   assert.equal(B.beginGuess(), false);
   assert.equal(B.endTurn(), false);
+  // ...but crossing cards off my own board is always allowed
+  assert.equal(B.toggleCard(5), true);
+  assert.equal(B.state.deduction[5], false);
 });
 
-test('disable mode blocks guessing, and vice versa', () => {
+test('disabling is free and never blocks guessing', () => {
   const { A, B } = pair();
   setupBoth(A, B);
-  assert.equal(A.beginDisable(), true);
-  assert.equal(A.state.turnMode, 'disable');
-  assert.equal(A.beginGuess(), false);     // locked out
-  // toggling a card crosses it out
-  assert.equal(A.toggleCard(5), true);
+  assert.equal(A.toggleCard(5), true);     // no mode needed
   assert.equal(A.state.deduction[5], false);
+  assert.equal(A.beginGuess(), true);      // still allowed after disabling
+  assert.equal(A.toggleCard(6), true);     // and disabling still works mid-guess
 });
 
-test('guess mode blocks disabling', () => {
+test('asking a question blocks guessing this turn', () => {
   const { A, B } = pair();
   setupBoth(A, B);
+  assert.equal(A.askQuestion(), true);
+  assert.equal(A.state.asked, true);
+  assert.equal(A.beginGuess(), false);     // locked out after asking
+  assert.equal(A.makeGuess(7), false);
+});
+
+test('asking a question notifies the opponent', () => {
+  const { A, B } = pair();
+  setupBoth(A, B);
+  let notified = null;
+  B.on('ask', (name) => { notified = name; });
+  A.askQuestion();
+  assert.equal(notified, 'A');
+});
+
+test('the ask-lock clears on your next turn', () => {
+  const { A, B } = pair();
+  setupBoth(A, B);
+  A.askQuestion(); A.endTurn();   // A asked, then ended the turn
+  B.endTurn();                     // back to A
+  assert.equal(A.state.asked, false);
   assert.equal(A.beginGuess(), true);
-  assert.equal(A.state.turnMode, 'guess');
-  assert.equal(A.toggleCard(5), false);
-  assert.equal(A.beginDisable(), false);
 });
 
 test('ending a turn reports counts and passes play', () => {
   const { A, B } = pair();
   setupBoth(A, B);
-  A.beginDisable();
   A.toggleCard(5); A.toggleCard(6); A.toggleCard(7);
   A.endTurn();
   assert.equal(A.state.turn, 'opp');
@@ -177,13 +195,22 @@ test('rematch clears chat history', () => {
 test('a full multi-turn game plays through', () => {
   const { A, B } = pair();
   setupBoth(A, B, 3, 7);
-  // A disables some, ends turn
-  A.beginDisable(); A.toggleCard(1); A.toggleCard(2); A.endTurn();
-  // B disables some, ends turn
-  B.beginDisable(); B.toggleCard(10); B.endTurn();
+  // A crosses some off, ends turn
+  A.toggleCard(1); A.toggleCard(2); A.endTurn();
+  // B crosses some off, ends turn
+  B.toggleCard(10); B.endTurn();
   assert.equal(A.state.turn, 'me');
   assert.equal(A.state.oppOpen, 19); // B crossed out 1
   // A guesses correctly
   A.beginGuess(); A.makeGuess(7);
   assert.equal(A.state.winner, 'me');
+});
+
+test('a card can be crossed off during the opponents turn', () => {
+  const { A, B } = pair();
+  setupBoth(A, B, 3, 7);          // A's turn first
+  assert.equal(B.state.turn, 'opp');
+  assert.equal(B.toggleCard(4), true);       // B takes notes off-turn
+  assert.equal(B.state.deduction[4], false);
+  assert.equal(A.state.oppOpen, 19);          // A sees B's live progress
 });
