@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createOnlineChannel, createLocalPair } from '../js/net.js';
-import { createFakeBroker, until } from './fake-peer.mjs';
+import { createFakeBroker, until, flush } from './fake-peer.mjs';
 
 // Spin up a host + one guest sharing a broker; returns handles + captured state.
 function pair(broker) {
@@ -119,6 +119,36 @@ test('online: a disconnect after the match opens surfaces a "closed" error', asy
   await until(() => st.guestErrors.some((e) => e.type === 'closed'));
   assert.ok(st.guestErrors.some((e) => e.type === 'closed'));
   host.close(); guest.close();
+});
+
+test('online: approving a guest that already left does not strand the host', async () => {
+  const broker = createFakeBroker();
+  const host = createOnlineChannel({ makePeer: broker.makePeer });
+  let code = null, hostOpen = false, ctl = null;
+  host.onOpen(() => { hostOpen = true; });
+  host.onJoinRequest((name, c) => { ctl = c; });   // capture, approve manually
+  host.host((c) => { code = c; });
+  await until(() => code !== null);
+
+  const g1 = createOnlineChannel({ makePeer: broker.makePeer });
+  g1.join(code, 'A');
+  await until(() => ctl !== null);
+  g1.close();                       // guest leaves before the host answers
+  await flush(60);                  // let the close reach the host's pending conn
+  const ctl1 = ctl; ctl = null;
+  ctl1.accept();                    // host approves the now-dead connection
+  await flush(60);
+  assert.equal(hostOpen, false, 'host must NOT commit the game to a dead connection');
+
+  // A fresh guest can still be accepted afterwards (room isn't wedged "full").
+  const g2 = createOnlineChannel({ makePeer: broker.makePeer });
+  let g2Open = false; g2.onOpen(() => { g2Open = true; });
+  g2.join(code, 'B');
+  await until(() => ctl !== null);
+  ctl.accept();
+  await until(() => hostOpen && g2Open);
+  assert.ok(hostOpen && g2Open, 'a fresh guest can still join after a ghost approval');
+  host.close(); g1.close(); g2.close();
 });
 
 test('local pair still wires two engines directly', () => {

@@ -218,14 +218,29 @@ function renderRooms(rooms) {
   }).join('');
 }
 
-// Host: a guest is asking to join — approve or decline.
-async function showJoinApproval(who, ctl) {
-  const ok = await confirmModal({
-    title: '🙋 Join request',
-    body: `<b>${escapeHTML(who)}</b> wants to join your room. Let them in?`,
-    okText: 'Approve', cancelText: 'Decline',
-  });
-  if (ok) ctl.accept(); else ctl.deny();
+// Host: a guest is asking to join — approve or decline. Requests are SERIALISED
+// through one queue: confirmModal reuses a single shared #modal, so two overlapping
+// prompts would clobber each other's handlers and strand the first guest.
+let approvalQueue = [];
+let approvalBusy = false;
+function showJoinApproval(who, ctl) {
+  approvalQueue.push({ who, ctl });
+  drainApprovals();
+}
+async function drainApprovals() {
+  if (approvalBusy) return;
+  approvalBusy = true;
+  while (approvalQueue.length) {
+    const { who, ctl } = approvalQueue.shift();
+    // eslint-disable-next-line no-await-in-loop
+    const ok = await confirmModal({
+      title: '🙋 Join request',
+      body: `<b>${escapeHTML(who)}</b> wants to join your room. Let them in?`,
+      okText: 'Approve', cancelText: 'Decline',
+    });
+    if (ok) ctl.accept(); else ctl.deny();
+  }
+  approvalBusy = false;
 }
 
 // Mark this browser's hosted room as finished and drop it from the lobby.
@@ -235,6 +250,13 @@ function endHostedRoom() {
     lobby.unpublish(hostedRoom);
   }
   hostedRoom = null;
+}
+
+// Tear down any current online game channel + hosted-room advertisement, so we
+// never leave a second (stale, "unavailable") room behind or a dangling peer.
+function teardownOnline() {
+  endHostedRoom();
+  if (G.channel) { try { G.channel.close(); } catch (_) {} G.channel = null; }
 }
 
 /* ------------------------------ online ------------------------------ */
@@ -273,6 +295,8 @@ function onOnlineMessage(m, engine) {
 
 function hostOnline() {
   const name = ($('#online-name').value || '').trim().slice(0, 14) || 'Player 1';
+  // Re-hosting must not leak a second room or leave the old game peer alive.
+  teardownOnline();
   G.mode = 'online';
   G.channel = createOnlineChannel();
   const engine = makeOnlineEngine(true);
@@ -299,12 +323,16 @@ function hostOnline() {
 }
 
 function joinOnline(codeArg) {
-  const code = String(codeArg || $('#join-code').value).trim();
+  const code = String(codeArg || $('#join-code').value).trim().toUpperCase();
   if (!code) { setNetStatus('Enter a room code first.', 'error'); return; }
+  if (hostedRoom && code === hostedRoom) {
+    setNetStatus("That's your own room — share the code with a friend so they can join.", 'error');
+    return;
+  }
   const name = ($('#online-name').value || '').trim().slice(0, 14) || 'Player 2';
-  // Drop any half-open channel left over from a declined/failed attempt so a
-  // fresh join doesn't race an old peer.
-  if (G.channel) { try { G.channel.close(); } catch (_) {} G.channel = null; }
+  // Leaving our own room (or a half-open prior attempt) to join someone else:
+  // tear it down so we don't strand a dead, still-advertised room.
+  teardownOnline();
   G.mode = 'online';
   G.channel = createOnlineChannel();
   const engine = makeOnlineEngine(false);
@@ -365,8 +393,9 @@ function showDisconnected() {
 
 /* ------------------------------ local ------------------------------- */
 function startLocal() {
-  // Tear down any half-open online room so a late joiner can't hijack this game.
-  if (G.channel) { G.channel.close(); G.channel = null; }
+  // Tear down any online room/channel so we don't leave a stale room advertised
+  // and a late joiner can't hijack this game.
+  teardownOnline();
   G.mode = 'local';
   activeEngine = null;
   setRoster(generateRoster());     // fresh random cast for this match
