@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commonTraits, commonTraitsText, groupByTurn } from '../js/loganalysis.js';
+import { commonTraits, commonTraitsText, groupByTurn, netBatchesByTurnActor } from '../js/loganalysis.js';
 
 // Minimal character stubs using the real trait keys
 // (hair, style, eye, skin, glasses, hat, beard, acc).
@@ -52,6 +52,41 @@ test('commonTraitsText: readable summary and empty case', () => {
     mk({ hair: 'red', style: 'long', eye: 'blue', skin: 'deep', glasses: 'sun', hat: 'crown', beard: 'beard', acc: 'scarf' }),
   ]);
   assert.equal(none, 'no shared traits');
+});
+
+test('netBatchesByTurnActor: a net-zero card (off then back on) is not listed', () => {
+  const evs = [
+    { turn: 1, ts: 1, by: 'me', cardId: 5, action: 'off' },   // real deduction
+    { turn: 1, ts: 2, by: 'me', cardId: 6, action: 'off' },   // off...
+    { turn: 1, ts: 3, by: 'me', cardId: 6, action: 'on' },    // ...then back on -> net 0
+  ];
+  const b = netBatchesByTurnActor(evs);
+  assert.deepEqual(b[1].me.off, [5]);
+  assert.deepEqual(b[1].me.on, []);
+});
+
+test('netBatchesByTurnActor: a card crossed off earlier is not re-listed on a later net-zero turn', () => {
+  const evs = [
+    { turn: 1, ts: 1, by: 'me', cardId: 5, action: 'off' },   // off in turn 1
+    { turn: 3, ts: 2, by: 'me', cardId: 5, action: 'on' },    // turn 3: on then off -> net 0
+    { turn: 3, ts: 3, by: 'me', cardId: 5, action: 'off' },
+  ];
+  const b = netBatchesByTurnActor(evs);
+  assert.deepEqual(b[1].me.off, [5]);
+  assert.equal(b[3], undefined);            // no batch for the net-zero turn
+});
+
+test('netBatchesByTurnActor: reactivation shows under on[], and actors are separate', () => {
+  const evs = [
+    { turn: 1, ts: 1, by: 'me', cardId: 5, action: 'off' },
+    { turn: 1, ts: 1, by: 'opp', cardId: 10, action: 'off' },
+    { turn: 2, ts: 2, by: 'me', cardId: 5, action: 'on' },    // brought back in turn 2
+  ];
+  const b = netBatchesByTurnActor(evs);
+  assert.deepEqual(b[1].me.off, [5]);
+  assert.deepEqual(b[1].opp.off, [10]);
+  assert.deepEqual(b[2].me.on, [5]);
+  assert.deepEqual(b[2].me.off, []);
 });
 
 test('groupByTurn: buckets events by turn in order', () => {

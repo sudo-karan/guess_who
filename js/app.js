@@ -3,7 +3,7 @@ import { generateRoster, renderAvatar, TRAIT_LABELS, traitRows } from './charact
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
 import { createLobby, ROOM_STATUS } from './lobby.js';
-import { commonTraitsText, groupByTurn } from './loganalysis.js';
+import { commonTraitsText, netBatchesByTurnActor } from './loganalysis.js';
 
 // The roster (name → randomised look) for the current match. Regenerated every
 // game; in online play the host generates it and sends it so both sides match.
@@ -991,36 +991,6 @@ function showOver(s) {
   showScreen('over');
 }
 
-// Build the merged, ordered timeline. Both clients build the SAME one: every
-// event carries its originator's timestamp, opponent card detail arrives via the
-// end-game `fulllog`, and ties break by a stable host-before-guest order.
-function buildCompleteLog(s) {
-  const merged = [...(s.log || []).filter((e) => e.kind !== 'oppcards'), ...(s.oppCardLog || [])];
-  const isHostActor = (e) => (e.by === 'me') ? !!s.isHost : !s.isHost;
-  merged.sort((a, b) =>
-    (a.turn - b.turn)
-    || ((a.ts || 0) - (b.ts || 0))
-    || (isHostActor(a) === isHostActor(b) ? 0 : (isHostActor(a) ? -1 : 1)));
-  return merged;
-}
-
-// Net card batches per actor within one turn ({ me:{off:[],on:[]}, opp:{...} }),
-// using each card's FINAL action that turn (so an off-then-on nets to on).
-function turnCardBatches(events) {
-  const perActor = {};
-  for (const e of events) {
-    if (e.kind !== 'card') continue;
-    (perActor[e.by] = perActor[e.by] || new Map()).set(e.cardId, e.action);
-  }
-  const out = {};
-  for (const [by, m] of Object.entries(perActor)) {
-    const off = [], on = [];
-    for (const [id, a] of m) (a === 'off' ? off : on).push(id);
-    out[by] = { off, on };
-  }
-  return out;
-}
-
 function overEventLine(e, s) {
   const name = e.by === 'me' ? (s.myName || 'You') : (s.oppName || 'Rival');
   const time = fmtTime(e.ts);
@@ -1052,23 +1022,40 @@ function batchBlockHTML(by, name, action, ids) {
 
 function renderCompleteLog(s) {
   const el = $('#over-chat');
-  const merged = buildCompleteLog(s);
-  if (!merged.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
+  // Card events (mine, plus the opponent's exchanged at game end); everything else
+  // (chat/ask/answer/guess) is the narrative timeline. `oppcards` count-summaries
+  // are dropped — the detailed opponent batches replace them here.
+  const cardEvents = [
+    ...(s.log || []).filter((e) => e.kind === 'card' && e.by === 'me'),
+    ...(s.oppCardLog || []),
+  ];
+  const nonCard = (s.log || []).filter((e) => e.kind !== 'card' && e.kind !== 'oppcards');
+  if (!cardEvents.length && !nonCard.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
 
   const nameOf = (by) => by === 'me' ? (s.myName || 'You') : (s.oppName || 'Rival');
   // Stable actor order (host first) so both players see identical ordering.
-  const actorRank = (by) => ((by === 'me') ? !!s.isHost : !s.isHost) ? 0 : 1;
+  const actorRank = (by) => (((by === 'me') ? !!s.isHost : !s.isHost) ? 0 : 1);
 
-  const turnsHTML = groupByTurn(merged).map((g) => {
-    const lines = g.events.filter((e) => e.kind !== 'card').map((e) => overEventLine(e, s)).join('');
-    const batches = turnCardBatches(g.events);
-    const batchHTML = Object.keys(batches)
+  // Net card batches per turn per actor (replayed vs turn-start state — a card
+  // crossed off then brought back within a turn nets to nothing, matching the
+  // per-turn count the opponent saw live).
+  const batches = netBatchesByTurnActor(cardEvents);
+
+  // Narrative events, grouped by turn (ordered by ts, host-first on ties).
+  nonCard.sort((a, b) => (a.turn - b.turn) || ((a.ts || 0) - (b.ts || 0)) || (actorRank(a.by) - actorRank(b.by)));
+  const nonCardByTurn = new Map();
+  for (const e of nonCard) { if (!nonCardByTurn.has(e.turn)) nonCardByTurn.set(e.turn, []); nonCardByTurn.get(e.turn).push(e); }
+
+  const turns = [...new Set([...nonCardByTurn.keys(), ...Object.keys(batches).map(Number)])].sort((a, b) => a - b);
+  const turnsHTML = turns.map((turn) => {
+    const lines = (nonCardByTurn.get(turn) || []).map((e) => overEventLine(e, s)).join('');
+    const tb = batches[turn] || {};
+    const batchHTML = Object.keys(tb)
       .sort((a, b) => actorRank(a) - actorRank(b))
-      .map((by) => batchBlockHTML(by, nameOf(by), 'off', batches[by].off)
-        + batchBlockHTML(by, nameOf(by), 'on', batches[by].on))
+      .map((by) => batchBlockHTML(by, nameOf(by), 'off', tb[by].off) + batchBlockHTML(by, nameOf(by), 'on', tb[by].on))
       .join('');
     if (!lines && !batchHTML) return '';
-    return `<div class="ol-turn"><div class="ol-turn-h">Turn ${g.turn}</div>${lines}${batchHTML}</div>`;
+    return `<div class="ol-turn"><div class="ol-turn-h">Turn ${turn}</div>${lines}${batchHTML}</div>`;
   }).join('');
 
   el.innerHTML = `<h4 class="oc-title">📜 Complete game log</h4><div class="ol-body">${turnsHTML}</div>`;

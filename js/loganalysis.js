@@ -29,6 +29,39 @@ export function commonTraitsText(cards) {
   return shared.map((t) => `${t.label} = ${t.valueLabel}`).join(' · ');
 }
 
+// Net card batches per turn per actor. Replays each actor's card events in order
+// and reports, for each turn, only the cards whose state NET-changed that turn:
+// on->off goes in `off`, off->on goes in `on`. A card crossed off then brought
+// back within the same turn (net zero) is NOT listed — matching the engine's
+// per-turn count (which diffs against the turn-start state). Returns
+// { [turn]: { [by]: { off:[ids], on:[ids] } } }.
+export function netBatchesByTurnActor(cardEvents) {
+  const result = {};
+  const actors = [...new Set((cardEvents || []).map((e) => e.by))];
+  for (const by of actors) {
+    const byTurn = new Map();
+    for (const e of (cardEvents || []).filter((e2) => e2.by === by)) {
+      if (!byTurn.has(e.turn)) byTurn.set(e.turn, []);
+      byTurn.get(e.turn).push(e);
+    }
+    const st = new Map();                       // cardId -> isOff (persists across turns)
+    for (const turn of [...byTurn.keys()].sort((a, b) => a - b)) {
+      const evs = byTurn.get(turn).slice().sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      const start = new Map();                  // touched card -> its state at turn start
+      for (const e of evs) if (!start.has(e.cardId)) start.set(e.cardId, st.get(e.cardId) || false);
+      for (const e of evs) st.set(e.cardId, e.action === 'off');
+      const off = [], on = [];
+      for (const [cardId, wasOff] of start) {
+        const nowOff = st.get(cardId) || false;
+        if (!wasOff && nowOff) off.push(cardId);
+        else if (wasOff && !nowOff) on.push(cardId);
+      }
+      if (off.length || on.length) (result[turn] = result[turn] || {})[by] = { off, on };
+    }
+  }
+  return result;
+}
+
 // Group a flat, chronological list of log events into per-turn buckets, each
 // { turn, events }, ordered by turn then original order. Used to render the
 // end-game transcript turn by turn.
