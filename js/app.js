@@ -1218,6 +1218,9 @@ function initOverControls() {
       setRoster(roster);
       G.channel.send({ type: 'roster', roster });
       activeEngine.requestRematch();
+    } else if (G.mode === 'robot') {
+      // Rematch vs the robot: a fresh solo game at the same difficulty (not pass & play).
+      startRobot(G.difficulty);
     } else {
       // Local: fresh cast, reset both engines, run the hot-seat setup again.
       G.A.requestRematch();               // resets A and notifies B (which resets too)
