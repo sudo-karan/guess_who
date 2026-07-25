@@ -32,6 +32,11 @@
           <span class="mode-title">Pass &amp; Play</span>
           <span class="mode-sub">Two players, one device</span>
         </button>
+        <button class="mode-card" id="btn-robot">
+          <span class="mode-emoji">🤖</span>
+          <span class="mode-title">Play a Robot</span>
+          <span class="mode-sub">Solo vs the computer</span>
+        </button>
         <button class="mode-card" id="btn-how">
           <span class="mode-emoji">📖</span>
           <span class="mode-title">How to Play</span>
@@ -74,6 +79,17 @@
         </div>
 
         <p id="net-status" class="net-status"></p>
+      </div>
+
+      <!-- Robot difficulty picker -->
+      <div id="robot-panel" class="panel hidden">
+        <h3>Play a robot 🤖</h3>
+        <p class="diff-hint">The robot asks questions and crosses off cards just like a real opponent. Pick how tough it should be:</p>
+        <div class="diff-row">
+          <button class="btn diff" data-diff="easy"><b>😊 Easy</b><span>asks random questions, guesses early</span></button>
+          <button class="btn diff" data-diff="medium"><b>🙂 Medium</b><span>asks decent questions</span></button>
+          <button class="btn diff" data-diff="hard"><b>😈 Hard</b><span>asks smart questions, rarely wrong</span></button>
+        </div>
       </div>
 
       <!-- How-to panel -->
@@ -239,6 +255,9 @@
 
   <div id="toast" class="toast hidden"></div>
   <div id="tooltip" class="tooltip hidden"></div>
+
+  <!-- Robot "thinking…" indicator (solo mode) -->
+  <div id="robot-thinking" class="robot-thinking hidden"><span class="rt-emoji">🤖</span> Robot is thinking…</div>
 
   <script type="module" src="js/app.js"></script>
 </body>
