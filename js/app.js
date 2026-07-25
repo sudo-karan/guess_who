@@ -4,6 +4,7 @@ import { createEngine, BOARD_SIZE } from './engine.js';
 import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
 import { createLobby, ROOM_STATUS } from './lobby.js';
 import { commonTraitsText, netBatchesByTurnActor } from './loganalysis.js';
+import { robotSetup, openCandidates, chooseQuestion, shouldGuess, cardsToCrossOff, pickGuess } from './ai.js';
 
 // The roster (name → randomised look) for the current match. Regenerated every
 // game; in online play the host generates it and sends it so both sides match.
@@ -144,6 +145,17 @@ function initHome() {
   };
   $('#btn-how-close').onclick = () => $('#how-panel').classList.add('hidden');
   $('#btn-local').onclick = startLocal;
+
+  // Play a robot: reveal the difficulty picker, then start on a choice.
+  $('#btn-robot').onclick = () => {
+    $('#robot-panel').classList.toggle('hidden');
+    $('#online-panel').classList.add('hidden');
+    $('#how-panel').classList.add('hidden');
+  };
+  $('#robot-panel').addEventListener('click', (e) => {
+    const btn = e.target.closest('.diff');
+    if (btn) startRobot(btn.dataset.diff);
+  });
 
   // Online: host
   $('#btn-host').onclick = () => hostOnline();
@@ -453,6 +465,90 @@ function beginLocalTurn(engine) {
     buttonText: 'Start my turn',
     onReady: () => { ensurePlayView(); renderPlay(engine.state); },
   });
+}
+
+/* ------------------------------ robot ------------------------------- */
+// Solo play vs the computer. Reuses the local two-engine wiring: engine A is you
+// (always the shown engine); engine B is the robot, driven automatically. There
+// are no pass screens — after you End Turn the robot takes its turn with a short
+// "thinking" beat, then hands back to you.
+let robotBusy = false;      // guards against overlapping robot turns
+let robotPendingQ = null;   // the structured question the robot is awaiting an answer to
+
+function startRobot(difficulty) {
+  teardownOnline();
+  G.mode = 'robot';
+  G.difficulty = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : 'medium';
+  robotBusy = false; robotPendingQ = null;
+  setRoster(generateRoster());
+  const pair = createLocalPair();
+  const A = createEngine({ isHost: true, myName: 'You' });
+  const B = createEngine({ isHost: false, myName: 'Robot 🤖' });
+  A.on('send', pair.a.send); pair.a.onData(A.handleMessage);
+  B.on('send', pair.b.send); pair.b.onData(B.handleMessage);
+  A.on('change', () => onLocalEngineChange(A));   // only YOU are ever the shown engine
+  // Both sides auto-answer structured questions truthfully from their own secret.
+  A.on('question', ({ question }) => autoAnswer(A, question));   // you answer the robot
+  B.on('question', ({ question }) => autoAnswer(B, question));   // robot answers you
+  A.on('answer', ({ text }) => toast('💬 Answer — ' + text));    // robot's reply to your question
+  B.on('answer', ({ yes }) => robotOnAnswer(B, yes));            // your reply to the robot's question
+  G.A = A; G.B = B;
+  activeEngine = A;
+
+  // You build your board; the robot sets up instantly; you play first.
+  enterSetup(A, () => {
+    B.setupLocal(robotSetup(ROSTER, Math.random));   // triggers begin (host A first)
+    ensurePlayView();
+    renderPlay(A.state);
+  });
+}
+
+function showRobotThinking(on) {
+  const el = $('#robot-thinking');
+  if (el) el.classList.toggle('hidden', !on);
+}
+// A little jitter so the robot doesn't feel robotic-instant.
+const robotDelay = (base = 850) => base + Math.floor(Math.random() * 500);
+
+// The robot's turn: guess if confident, otherwise ask a splitting question (the
+// cross-off + End Turn happen in robotOnAnswer once you've answered).
+function robotTurn(B) {
+  if (robotBusy) return;
+  robotBusy = true;
+  showRobotThinking(true);
+  setTimeout(() => {
+    const s = B.state;
+    if (s.phase !== 'play' || s.turn !== 'me') { robotBusy = false; showRobotThinking(false); return; }
+    const cands = openCandidates(s.deduction, s.oppBoard);
+    const guess = () => {
+      const id = pickGuess(cands.length ? cands : s.oppBoard, Math.random);
+      B.beginGuess(); B.makeGuess(id);
+      robotBusy = false; showRobotThinking(false);
+      afterLocalMaybeOver();
+    };
+    if (cands.length === 0 || shouldGuess(cands.length, G.difficulty, Math.random)) { guess(); return; }
+    const q = chooseQuestion(cands, CHAR_BY_ID, G.difficulty, Math.random);
+    if (!q) { guess(); return; }
+    robotPendingQ = q;
+    B.askStructured(q, buildQuestionText(q));   // -> you auto-answer -> robotOnAnswer
+  }, robotDelay());
+}
+
+// After you answer the robot's question: cross off the ruled-out cards, then End Turn.
+function robotOnAnswer(B, yes) {
+  if (G.mode !== 'robot' || !robotPendingQ) return;
+  const q = robotPendingQ; robotPendingQ = null;
+  setTimeout(() => {
+    if (B.state.phase === 'play' && B.state.turn === 'me') {
+      const cands = openCandidates(B.state.deduction, B.state.oppBoard);
+      for (const id of cardsToCrossOff(cands, q, yes, CHAR_BY_ID)) B.toggleCard(id);
+    }
+    setTimeout(() => {
+      if (B.state.phase === 'play' && B.state.turn === 'me') B.endTurn();   // hand back to you
+      robotBusy = false;
+      showRobotThinking(false);
+    }, robotDelay(450));
+  }, robotDelay(450));
 }
 
 /* ------------------------------ setup ------------------------------- */
@@ -810,6 +906,8 @@ function initPlayControls() {
     if (G.mode === 'local') {
       const other = e === G.A ? G.B : G.A;
       beginLocalTurn(other);
+    } else if (G.mode === 'robot') {
+      robotTurn(G.B);                 // your turn is over — let the robot play
     }
   };
 
