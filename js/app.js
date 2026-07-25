@@ -1132,13 +1132,24 @@ function overEventLine(e, s) {
   return `<div class="ol-line ${e.by === 'me' ? 'me' : 'opp'}"><span class="oll-meta"><b>${escapeHTML(name)}</b> · ${time}</span><span class="oll-body">${body}</span></div>`;
 }
 
-function batchBlockHTML(by, name, action, ids) {
+// The set of values present for each trait across a board — the value-space a
+// deduction over that board distinguishes within (lets the log say "not Brown").
+function boardTraitValues(boardIds) {
+  const m = {};
+  for (const id of (boardIds || [])) {
+    const ch = CHAR_BY_ID[id]; if (!ch) continue;
+    for (const trait of Object.keys(TRAIT_LABELS)) { (m[trait] = m[trait] || new Set()).add(ch[trait]); }
+  }
+  return m;
+}
+
+function batchBlockHTML(by, name, action, ids, boardValues) {
   if (!ids.length) return '';
   const cards = ids.map((id) => logCardHTML(id)).join('');
   const chars = ids.map((id) => CHAR_BY_ID[id]).filter(Boolean);
   const verb = action === 'off' ? '🚫 crossed off' : '↩︎ brought back';
   const commonLine = ids.length >= 2
-    ? `<div class="olb-common">Common features: <b>${escapeHTML(commonTraitsText(chars))}</b></div>`
+    ? `<div class="olb-common">Common features: <b>${escapeHTML(commonTraitsText(chars, boardValues))}</b></div>`
     : '';
   return `<div class="ol-batch ${by === 'me' ? 'me' : 'opp'}">
     <div class="olb-head"><b>${escapeHTML(name)}</b> ${verb} ${ids.length} card${ids.length === 1 ? '' : 's'}</div>
@@ -1168,6 +1179,10 @@ function renderCompleteLog(s) {
   // per-turn count the opponent saw live).
   const batches = netBatchesByTurnActor(cardEvents);
 
+  // Value-space each player deduced within: YOU cross off the opponent's board,
+  // the opponent crosses off YOUR board. Enables "not Brown"-style common features.
+  const refBoard = { me: boardTraitValues(s.oppBoard), opp: boardTraitValues(s.myBoard) };
+
   // Narrative events, grouped by turn (ordered by ts, host-first on ties).
   nonCard.sort((a, b) => (a.turn - b.turn) || ((a.ts || 0) - (b.ts || 0)) || (actorRank(a.by) - actorRank(b.by)));
   const nonCardByTurn = new Map();
@@ -1179,7 +1194,7 @@ function renderCompleteLog(s) {
     const tb = batches[turn] || {};
     const batchHTML = Object.keys(tb)
       .sort((a, b) => actorRank(a) - actorRank(b))
-      .map((by) => batchBlockHTML(by, nameOf(by), 'off', tb[by].off) + batchBlockHTML(by, nameOf(by), 'on', tb[by].on))
+      .map((by) => batchBlockHTML(by, nameOf(by), 'off', tb[by].off, refBoard[by]) + batchBlockHTML(by, nameOf(by), 'on', tb[by].on, refBoard[by]))
       .join('');
     if (!lines && !batchHTML) return '';
     return `<div class="ol-turn"><div class="ol-turn-h">Turn ${turn}</div>${lines}${batchHTML}</div>`;
