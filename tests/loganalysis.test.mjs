@@ -44,14 +44,43 @@ test('commonTraits: nothing shared when cards fully differ on a trait', () => {
 
 test('commonTraitsText: readable summary and empty case', () => {
   const txt = commonTraitsText([mk({ glasses: 'sun', hat: 'crown' }), mk({ glasses: 'sun', hat: 'crown', hair: 'red' })]);
-  assert.match(txt, /Glasses = Sunglasses/);
-  assert.match(txt, /Headwear = Crown/);
+  assert.match(txt, /Glasses: Sunglasses/);
+  assert.match(txt, /Headwear: Crown/);
   // A batch with no shared trait at all:
   const none = commonTraitsText([
     mk({ hair: 'black', style: 'short', eye: 'brown', skin: 'light', glasses: 'none', hat: 'none', beard: 'none', acc: 'none' }),
     mk({ hair: 'red', style: 'long', eye: 'blue', skin: 'deep', glasses: 'sun', hat: 'crown', beard: 'beard', acc: 'scarf' }),
   ]);
   assert.equal(none, 'no shared traits');
+});
+
+test('commonTraits: detects a shared ABSENCE ("all lack brown eyes") via the board value-space', () => {
+  // Reproduces the reported case: cross off everyone WITHOUT brown eyes. Their eye
+  // colours mix blue/green — no single shared value — but none has brown.
+  const batch = [mk({ eye: 'blue', hair: 'black' }), mk({ eye: 'green', hair: 'red' }), mk({ eye: 'blue', hair: 'blonde' })];
+  const boardValues = { eye: ['brown', 'blue', 'green'] };
+  const eye = commonTraits(batch, boardValues).find((t) => t.trait === 'eye');
+  assert.ok(eye, 'the shared absence is reported');
+  assert.equal(eye.kind, 'not');
+  assert.equal(eye.value, 'brown');
+  assert.equal(eye.valueLabel, 'Brown');
+  assert.match(commonTraitsText(batch, boardValues), /Eye colour: not Brown/);
+  // Without the board reference, no eye feature (positive-only, backwards compatible).
+  assert.ok(!commonTraits(batch).some((t) => t.trait === 'eye'));
+});
+
+test('commonTraits: no absence when the batch spans all values or misses more than one', () => {
+  const spanAll = [mk({ eye: 'brown' }), mk({ eye: 'blue' }), mk({ eye: 'green' })];
+  assert.ok(!commonTraits(spanAll, { eye: ['brown', 'blue', 'green'] }).some((t) => t.trait === 'eye'));
+  const missesTwo = [mk({ skin: 'light' }), mk({ skin: 'tan' })];      // board has 4 skin tones
+  assert.ok(!commonTraits(missesTwo, { skin: ['light', 'tan', 'brown', 'deep'] }).some((t) => t.trait === 'skin'));
+});
+
+test('commonTraits: a shared POSITIVE value wins over an absence', () => {
+  const batch = [mk({ eye: 'blue' }), mk({ eye: 'blue' })];
+  const feat = commonTraits(batch, { eye: ['brown', 'blue', 'green'] }).find((t) => t.trait === 'eye');
+  assert.equal(feat.kind, 'is');
+  assert.equal(feat.value, 'blue');
 });
 
 test('netBatchesByTurnActor: a net-zero card (off then back on) is not listed', () => {

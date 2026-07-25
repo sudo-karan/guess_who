@@ -4,29 +4,50 @@
 import { TRAIT_LABELS } from './characters.js';
 
 // Given a set of characters (e.g. the cards someone crossed off in one turn),
-// return the traits whose value is identical across ALL of them — the "common
-// features" of that batch. Each entry is { trait, label, value, valueLabel }.
-// Returns [] for an empty batch. For a single card every trait is trivially
-// shared; callers decide how to phrase that.
-export function commonTraits(cards) {
+// return their "common features". Two kinds are detected:
+//   • kind:'is'  — every card shares the SAME value (e.g. all have Glasses: None).
+//   • kind:'not' — every card LACKS exactly one value that exists in the board's
+//                  value-space for that trait (e.g. none have Brown eyes, though
+//                  their eye colours otherwise differ). This is how a deduction
+//                  like "cross off everyone WITHOUT brown eyes" reads.
+// `boardValues` maps a trait -> the set/array of values present on the board the
+// batch was drawn from (the value-space the deduction distinguishes within); it
+// enables the 'not' kind. Omit it for positive-only detection.
+// Each entry is { trait, label, kind, value, valueLabel }. [] for an empty batch.
+export function commonTraits(cards, boardValues) {
   if (!cards || !cards.length) return [];
   const out = [];
   for (const [key, meta] of Object.entries(TRAIT_LABELS)) {
-    const first = cards[0][key];
-    if (first == null) continue;
-    if (cards.every((c) => c[key] === first)) {
-      out.push({ trait: key, label: meta.name, value: first, valueLabel: meta.values[first] || String(first) });
+    const present = new Set();
+    let ok = true;
+    for (const c of cards) { const v = c[key]; if (v == null) { ok = false; break; } present.add(v); }
+    if (!ok || present.size === 0) continue;
+
+    if (present.size === 1) {
+      const v = [...present][0];
+      out.push({ trait: key, label: meta.name, kind: 'is', value: v, valueLabel: meta.values[v] || String(v) });
+      continue;
+    }
+    // Shared absence: the batch spans all-but-one of the board's values for this
+    // trait, i.e. there is exactly one board value none of them have.
+    const ref = boardValues && boardValues[key];
+    if (ref) {
+      const absent = [...ref].filter((v) => !present.has(v));
+      if (absent.length === 1) {
+        const v = absent[0];
+        out.push({ trait: key, label: meta.name, kind: 'not', value: v, valueLabel: meta.values[v] || String(v) });
+      }
     }
   }
   return out;
 }
 
-// Human-readable one-liner for a batch's common features, e.g.
-// "Glasses = None · Hair colour = Black" or "no shared traits".
-export function commonTraitsText(cards) {
-  const shared = commonTraits(cards);
+// Human-readable one-liner, e.g. "Glasses: None · Eye colour: not Brown", or
+// "no shared traits".
+export function commonTraitsText(cards, boardValues) {
+  const shared = commonTraits(cards, boardValues);
   if (!shared.length) return 'no shared traits';
-  return shared.map((t) => `${t.label} = ${t.valueLabel}`).join(' · ');
+  return shared.map((t) => (t.kind === 'not' ? `${t.label}: not ${t.valueLabel}` : `${t.label}: ${t.valueLabel}`)).join(' · ');
 }
 
 // Net card batches per turn per actor. Replays each actor's card events in order
