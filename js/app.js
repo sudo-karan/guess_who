@@ -182,15 +182,26 @@ function setNetStatus(msg, kind = '') {
 
 /* ------------------------------ lobby ------------------------------- */
 // Start (or refresh) serverless room discovery. Populates the room browser.
+let lobbyGotRooms = false;      // has the coordinator ever answered us?
+let lobbyWatchdog = null;
 function ensureLobby() {
   if (lobby) { lobby.refresh(); return; }
   if (!peerAvailable()) {
     renderRoomsMessage('Online room discovery needs an internet connection. You can still Pass & Play.');
     return;
   }
+  lobbyGotRooms = false;
   lobby = createLobby({ onRooms: renderRooms, onStatus: onLobbyStatus });
   lobby.start();
   lobby.refresh();
+  // If the room list never answers, say so instead of showing a bare "no rooms"
+  // (which reads as "my room isn't listed"). Joining by code always still works.
+  clearTimeout(lobbyWatchdog);
+  lobbyWatchdog = setTimeout(() => {
+    if (!lobbyGotRooms) {
+      renderRoomsMessage('Couldn\'t reach the shared room list. Share your room code directly — joining by code still works.');
+    }
+  }, 12000);
 }
 
 function onLobbyStatus(kind) {
@@ -207,23 +218,30 @@ function renderRoomsMessage(msg) {
   if (el) el.innerHTML = `<p class="rb-empty">${escapeHTML(msg)}</p>`;
 }
 
-// Render the live list of rooms (excluding ended rooms and our own).
+// Render the live list of rooms. Your OWN room is shown too (marked "Your room")
+// so you can confirm it's being advertised — you just can't join it.
 function renderRooms(rooms) {
   const el = $('#room-list');
   if (!el) return;
-  const shown = (rooms || []).filter((r) => r.status !== ROOM_STATUS.ENDED && r.code !== hostedRoom);
+  lobbyGotRooms = true;
+  const shown = (rooms || []).filter((r) => r.status !== ROOM_STATUS.ENDED);
   if (!shown.length) {
     renderRoomsMessage('No open rooms yet — host one above and share the code, or wait for a friend to appear here.');
     return;
   }
   el.innerHTML = shown.map((r) => {
-    const joinable = r.status === ROOM_STATUS.OPEN;
-    const chip = joinable
-      ? '<span class="rb-chip open">Open</span>'
-      : '<span class="rb-chip playing">In game</span>';
-    return `<div class="room-card">
+    const mine = r.code === hostedRoom;
+    const joinable = r.status === ROOM_STATUS.OPEN && !mine;
+    const chip = mine
+      ? '<span class="rb-chip mine">Your room</span>'
+      : (r.status === ROOM_STATUS.OPEN
+        ? '<span class="rb-chip open">Open</span>'
+        : '<span class="rb-chip playing">In game</span>');
+    return `<div class="room-card${mine ? ' mine' : ''}">
       <div class="rc-info"><span class="rc-host">${escapeHTML(r.hostName)}'s room</span>${chip}</div>
-      ${joinable
+      ${mine
+        ? `<button class="btn tiny" disabled>Code ${escapeHTML(r.code)}</button>`
+        : joinable
         ? `<button class="btn tiny primary rb-join" data-code="${escapeHTML(r.code)}">Request to join</button>`
         : '<button class="btn tiny" disabled>Game in progress</button>'}
     </div>`;

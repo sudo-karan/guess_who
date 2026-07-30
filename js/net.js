@@ -52,31 +52,52 @@ export function createOnlineChannel({ makePeer } = {}) {
   // approves the guest's join request. A second guest to an occupied room is
   // told the room is full.
   function wireHostConn(c) {
+    let prompted = false;      // only prompt once per connection (JOIN may repeat)
+    let settled = false;       // has this connection been accepted/denied
+
+    function askApproval(name) {
+      if (prompted || settled) return;
+      prompted = true;
+      const accept = () => {
+        settled = true;
+        if (opened) { if (c !== conn) { try { c.send({ __t: H.FULL }); } catch (_) {} softClose(c); } return; }
+        // The guest may have left while the host deliberated — don't commit the
+        // game to a dead connection (which would strand the host in setup and make
+        // every future guest hit "room full").
+        if (c.open === false) { status('The player left before you answered.'); return; }
+        conn = c; opened = true;
+        try { c.send({ __t: H.ACCEPT }); } catch (_) {}
+        status('Connected!');
+        cbs.open && cbs.open();
+      };
+      const deny = () => { settled = true; try { c.send({ __t: H.DENY }); } catch (_) {} softClose(c); };
+      if (cbs.joinRequest) cbs.joinRequest(name, { accept, deny });
+      else accept();          // no approval handler wired -> accept (back-compat)
+    }
+
+    // A guest whose JOIN frame never arrives would otherwise leave the host stuck
+    // on "Player joining…" forever. If a connection sits silent, prompt anyway —
+    // the guest is waiting for a verdict and will proceed once accepted.
+    const fallback = setTimeout(() => {
+      if (!prompted && !settled && !opened && c.open !== false) {
+        status('A player is waiting to join…');
+        askApproval('A player');
+      }
+    }, 6000);
+
     c.on('data', (d) => {
       if (d && d.__t === H.JOIN) {
+        clearTimeout(fallback);
         // Already in a game: reject a DIFFERENT second guest as full, but ignore a
         // duplicate join on the already-accepted connection (never kill the live game).
         if (opened) { if (c !== conn) { try { c.send({ __t: H.FULL }); } catch (_) {} softClose(c); } return; }
-        const name = String(d.name || 'A player').slice(0, 14);
-        const accept = () => {
-          if (opened) { if (c !== conn) { try { c.send({ __t: H.FULL }); } catch (_) {} softClose(c); } return; }
-          // The guest may have left while the host deliberated — don't commit the
-          // game to a dead connection (which would strand the host in setup and make
-          // every future guest hit "room full").
-          if (c.open === false) { status('The player left before you answered.'); return; }
-          conn = c; opened = true;
-          try { c.send({ __t: H.ACCEPT }); } catch (_) {}
-          status('Connected!');
-          cbs.open && cbs.open();
-        };
-        const deny = () => { try { c.send({ __t: H.DENY }); } catch (_) {} softClose(c); };
-        if (cbs.joinRequest) cbs.joinRequest(name, { accept, deny });
-        else accept();          // no approval handler wired -> accept (back-compat)
+        askApproval(String(d.name || 'A player').slice(0, 14));
         return;
       }
       if (c === conn && opened) cbs.data && cbs.data(d);   // game data only from the accepted guest
     });
     c.on('close', () => {
+      clearTimeout(fallback);
       if (c === conn && opened) {
         opened = false;
         status('Opponent disconnected.');
@@ -84,6 +105,7 @@ export function createOnlineChannel({ makePeer } = {}) {
       }
     });
     c.on('error', (err) => {
+      clearTimeout(fallback);
       if (c === conn) cbs.error && cbs.error({ type: 'conn', message: String((err && err.message) || err) });
     });
   }
@@ -92,12 +114,36 @@ export function createOnlineChannel({ makePeer } = {}) {
   function wireGuestConn(c) {
     conn = c;   // tentative — not "opened" until the host accepts
     let pending = [];   // game data that somehow arrives before ACCEPT is processed
+    let verdict = false;
+    let joinTimer = null, giveUp = null, openTimer = null;
+    const stopTimers = () => { clearInterval(joinTimer); clearTimeout(giveUp); clearTimeout(openTimer); };
+    const sendJoin = () => { try { c.send({ __t: H.JOIN, name: myName }); } catch (_) {} };
+
+    // If the data channel never opens, say so rather than hanging on "Connecting…".
+    openTimer = setTimeout(() => {
+      if (!verdict && c.open === false) {
+        cbs.error && cbs.error({ type: 'timeout', message: 'Couldn\'t connect to that room. Check the code, or ask the host to create a new room.' });
+      }
+    }, 15000);
+
     c.on('open', () => {
+      clearTimeout(openTimer);
       status('Asking the host to let you in…');
-      try { c.send({ __t: H.JOIN, name: myName }); } catch (_) {}
+      sendJoin();
+      // Re-send periodically: a dropped JOIN frame is the classic cause of a host
+      // sitting on "Player joining…" while the guest waits forever. Duplicates are
+      // ignored host-side.
+      joinTimer = setInterval(() => { if (!verdict) sendJoin(); else clearInterval(joinTimer); }, 3000);
+      giveUp = setTimeout(() => {
+        if (!verdict) {
+          stopTimers();
+          cbs.error && cbs.error({ type: 'timeout', message: 'No response from the host — they may not have answered your request. Try again.' });
+        }
+      }, 60000);
     });
     c.on('data', (d) => {
       if (d && d.__t === H.ACCEPT) {
+        verdict = true; stopTimers();
         opened = true; status('Connected!');
         cbs.open && cbs.open();
         // Flush anything (e.g. the roster) that raced ahead of the accept so it is
@@ -106,19 +152,23 @@ export function createOnlineChannel({ makePeer } = {}) {
         for (const m of q) cbs.data && cbs.data(m);
         return;
       }
-      if (d && d.__t === H.DENY) { cbs.error && cbs.error({ type: 'denied', message: 'The host declined your request to join.' }); return; }
-      if (d && d.__t === H.FULL) { cbs.error && cbs.error({ type: 'full', message: 'That room is already full.' }); return; }
+      if (d && d.__t === H.DENY) { verdict = true; stopTimers(); cbs.error && cbs.error({ type: 'denied', message: 'The host declined your request to join.' }); return; }
+      if (d && d.__t === H.FULL) { verdict = true; stopTimers(); cbs.error && cbs.error({ type: 'full', message: 'That room is already full.' }); return; }
       if (opened) cbs.data && cbs.data(d);
       else if (d && !d.__t) pending.push(d);   // buffer game data until accepted
     });
     c.on('close', () => {
+      stopTimers();
       if (opened) {
         opened = false;
         status('Opponent disconnected.');
         cbs.error && cbs.error({ type: 'closed', message: 'Connection closed.' });
+      } else if (!verdict) {
+        cbs.error && cbs.error({ type: 'closed', message: 'The room closed before you got in. Ask the host to create a new room.' });
       }
     });
     c.on('error', (err) => {
+      stopTimers();
       cbs.error && cbs.error({ type: 'conn', message: String((err && err.message) || err) });
     });
   }
