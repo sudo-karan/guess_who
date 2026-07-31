@@ -125,6 +125,8 @@ body {
 .rb-chip { font-size: 0.72rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
 .rb-chip.open { background: rgba(55, 214, 122, 0.18); color: #1c9e56; }
 .rb-chip.playing { background: rgba(255, 210, 63, 0.22); color: #a9820a; }
+.rb-chip.mine { background: rgba(124, 92, 255, 0.16); color: var(--purple-dk); }
+.room-card.mine { border-style: dashed; border-color: color-mix(in srgb, var(--purple) 45%, var(--line)); }
 
 /* ---- robot difficulty picker ---- */
 .diff-hint { color: var(--ink-soft); text-align: center; margin: 4px 0 14px; }
