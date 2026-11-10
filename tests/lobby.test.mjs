@@ -140,7 +140,7 @@ test('feed: a host that goes silent ages out of the list', async () => {
   const ntfy = createFakeNtfy();
   const seen = [];
   let clock = 1000;
-  const B = feed(ntfy, { onRooms: (r) => seen.push(r), now: () => clock });
+  const B = feed(ntfy, { onRooms: (r) => seen.push(r), now: () => clock, sweepMs: 20 });
   B.start();
 
   const A = feed(ntfy);
@@ -148,9 +148,46 @@ test('feed: a host that goes silent ages out of the list', async () => {
   A.publish({ code: 'GHST', hostName: 'Ann' });
   await until(() => seen.length && seen.at(-1).some((x) => x.code === 'GHST'));
 
-  clock += 60000;                  // a minute of silence (no beacons)
+  clock += 15 * 60000;             // a quarter hour of silence (past the stale window)
   await until(() => !seen.at(-1).some((x) => x.code === 'GHST'), 12000);
   assert.ok(!seen.at(-1).some((x) => x.code === 'GHST'), 'stale rooms are swept');
+  A.close(); B.close();
+});
+
+test('feed: a host stays well inside the relay service request budget', async () => {
+  // THE bug this replaced: a 15s beacon spent ~240 publishes an hour against a
+  // 250-per-day per-IP quota, so after an hour of hosting every request — the
+  // join handshake included — was silently rate-limited.
+  const ntfy = createFakeNtfy();
+  let clock = 0;
+  const A = feed(ntfy, { now: () => clock, sweepMs: 10, keepaliveMs: 50 });
+  A.start();
+  A.publish({ code: 'BDGT', hostName: 'Ann' });
+  const afterPublish = ntfy.postCount();
+
+  // Simulate an hour at the configured keepalive rate (50ms stands in for 4 min).
+  const hourOfTicks = Math.round(3600000 / 240000);          // real cadence: 15/hour
+  await flush(50 * hourOfTicks + 60);
+  const perHour = ntfy.postCount() - afterPublish;
+  assert.ok(perHour <= 20, `a host should publish at most ~20/hour, saw ${perHour}`);
+  A.close();
+});
+
+test('feed: a late page asks once, and only live hosts answer', async () => {
+  const ntfy = createFakeNtfy();
+  const seenB = [];
+  const A = feed(ntfy);
+  A.start();
+  A.publish({ code: 'WHO1', hostName: 'Ann' });
+  await flush(20);
+
+  const before = ntfy.postCount();
+  const B = feed(ntfy, { onRooms: (r) => seenB.push(r) });
+  B.start();                                 // start() asks "who's there?"
+  await until(() => seenB.length && seenB.at(-1).some((x) => x.code === 'WHO1'));
+  assert.ok(seenB.at(-1).some((x) => x.code === 'WHO1'), 'the late page learns about the room');
+  // One "who" from B plus at most one answer from A — not a broadcast storm.
+  assert.ok(ntfy.postCount() - before <= 3, 'a browse costs a couple of requests, not a flood');
   A.close(); B.close();
 });
 

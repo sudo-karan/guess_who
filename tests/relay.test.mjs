@@ -114,6 +114,45 @@ test('relay: an oversized message is chunked and reassembled intact', async () =
   host.close(); guest.close();
 });
 
+test('relay: a guest whose JOIN is rate-limited is TOLD, not left waiting', async () => {
+  // THE reported bug: the guest sat on "Asking the host to let you in…" forever
+  // while post() swallowed a 429, so the host was never asked anything.
+  const ntfy = createFakeNtfy({ throttleAfter: 0 });     // every publish is 429'd
+  const guest = createRelayChannel({ fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl });
+  const errs = [];
+  guest.onError((e) => errs.push(e));
+  guest.join('AB3U', 'Bo');
+  await until(() => errs.length > 0, 20000);
+  assert.ok(errs.length, 'the player is told something went wrong');
+  assert.ok(['ratelimited', 'unsent'].includes(errs[0].type), `got ${errs[0].type}`);
+  assert.match(errs[0].message, /rate-limited/i, 'and the message names the real reason');
+  assert.ok(guest.diagnostics().timesThrottled > 0, 'and the details panel can show it');
+  guest.close();
+});
+
+test('relay: a subscription killed by the service is rebuilt, not left deaf', async () => {
+  // A browser abandons an EventSource for good when a reconnect is answered with
+  // an HTTP error. A host that is silently deaf never sees a join request.
+  const ntfy = createFakeNtfy();
+  const host = createRelayChannel({ fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl });
+  host.onJoinRequest(() => {});
+  host.host('AB3U');
+  await until(() => /listening/.test(host.diagnostics().listening));
+
+  ntfy.killSubscriptions('guesswho-v1-AB3U-h');
+  assert.match(host.diagnostics().listening, /dropped|reconnecting/);
+  // It must come back by itself and receive a join request afterwards.
+  await until(() => /listening/.test(host.diagnostics().listening), 20000);
+
+  let asked = null;
+  host.onJoinRequest((who) => { asked = who; });
+  const guest = createRelayChannel({ fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl });
+  guest.join('AB3U', 'Bo');
+  await until(() => asked !== null, 20000);
+  assert.equal(asked, 'Bo', 'the rebuilt subscription still hears a join request');
+  host.close(); guest.close();
+});
+
 test('relay: close stops delivery', async () => {
   const ntfy = createFakeNtfy();
   const { host, guest, st } = pair(ntfy);

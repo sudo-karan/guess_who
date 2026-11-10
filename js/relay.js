@@ -14,6 +14,12 @@
 // one carrying messages TO the host, one carrying messages TO the guest. Each side
 // subscribes to its own topic over Server-Sent Events and POSTs to the other's.
 //
+// BUDGET. ntfy.sh rate-limits per IP: ~60 requests per 5 minutes and 250 publishes
+// per day, and two players behind one router SHARE that budget. Every request here
+// is therefore spent deliberately: retries are few and spaced, and a throttled
+// request is reported to the player rather than swallowed — being silently
+// rate-limited is indistinguishable from the app being broken.
+//
 // PRIVACY: a relayed game's messages (display names, chat, moves) pass through a
 // public service and are readable by anyone who knows the room topic. Direct
 // WebRTC is always tried first and is end-to-end encrypted; this is the fallback.
@@ -22,11 +28,25 @@
 // The interface is deliberately identical to createOnlineChannel() in net.js, so
 // the two are interchangeable and can be composed (see channel.js).
 
-export const RELAY_BASE = 'https://ntfy.sh';
+const DEFAULT_BASE = 'https://ntfy.sh';
 const TOPIC_PREFIX = 'guesswho-v1-';
 const MAX_BODY = 3000;          // ntfy's per-message body limit is 4 KiB; stay clear
-const JOIN_RETRY_MS = 3000;
-const JOIN_GIVEUP_MS = 25000;
+const JOIN_RETRY_MS = 5000;     // spaced out: each retry costs a request from the quota
+const JOIN_MAX_TRIES = 4;       // ...so cap them rather than hammering for a minute
+const RESUB_MS = 4000;          // backoff before rebuilding a dead subscription
+const RESUB_MAX = 4;
+
+// Anyone self-hosting the game can point it at their own ntfy instance (which has
+// no shared rate limit) by setting window.__GW_RELAY_BASE before the app loads.
+export function relayBase() {
+  if (typeof window !== 'undefined' && typeof window.__GW_RELAY_BASE === 'string' && window.__GW_RELAY_BASE) {
+    return window.__GW_RELAY_BASE.replace(/\/+$/, '');
+  }
+  return DEFAULT_BASE;
+}
+
+// Kept as a named export for callers that only need the default.
+export const RELAY_BASE = DEFAULT_BASE;
 
 // Reserved handshake messages, namespaced with `__t` exactly as in net.js so the
 // host/guest approval protocol is shared between both transports.
@@ -50,11 +70,13 @@ export function relayAvailable() {
 }
 
 // `fetchImpl` / `EventSourceImpl` are injectable so this is testable without a network.
-export function createRelayChannel({ base = RELAY_BASE, fetchImpl, EventSourceImpl } = {}) {
+export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
+  const url = (base || relayBase()).replace(/\/+$/, '');
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
   const ES = EventSourceImpl || (typeof EventSource === 'function' ? EventSource : null);
 
   let sub = null;             // our EventSource subscription
+  let inTopic = null;         // the topic we listen on
   let outTopic = null;        // the topic we publish to
   let opened = false;         // has the match been approved and started
   let closed = false;
@@ -64,56 +86,85 @@ export function createRelayChannel({ base = RELAY_BASE, fetchImpl, EventSourceIm
   let peerSid = null;         // the token we accept messages from
   let verdict = false;        // guest: has the host answered
   let prompted = false;       // host: have we already raised this join request
-  let joinTimer = null, giveUp = null;
+  let joinTimer = null, joinTries = 0;
+  let resubs = 0;
   const seen = new Set();     // ntfy message ids already handled (SSE may re-deliver)
   const chunks = new Map();   // reassembly buffers for oversized messages
   const cbs = { data: null, open: null, error: null, status: null, joinRequest: null };
+  // Everything the "Connection details" readout needs to explain a stuck room.
+  const diag = { sent: 0, failed: 0, throttled: 0, lastStatus: null, sub: 'not started' };
 
   const status = (t) => { if (!closed) cbs.status && cbs.status(t); };
   const fail = (type, message) => { if (!closed) cbs.error && cbs.error({ type, message }); };
-  const stopTimers = () => { clearInterval(joinTimer); clearTimeout(giveUp); joinTimer = giveUp = null; };
+  const stopTimers = () => { clearInterval(joinTimer); joinTimer = null; };
 
   /* ---------------------------- publishing ---------------------------- */
 
+  // One attempt plus at most one spaced retry. Retrying harder makes throttling
+  // worse, since every attempt spends from the same per-IP budget.
   async function post(body, tries = 0) {
     if (closed || !doFetch || !outTopic) return false;
     try {
-      const res = await doFetch(`${base}/${outTopic}`, { method: 'POST', body });
-      if (res && res.status === 429 && tries < 4) {       // rate limited — back off
-        await sleep(1500 * (tries + 1));
-        return post(body, tries + 1);
+      const res = await doFetch(`${url}/${outTopic}`, { method: 'POST', body });
+      diag.lastStatus = (res && res.status) || 0;
+      if (res && res.status === 429) {
+        diag.throttled++;
+        if (tries < 1) { await sleep(3000); return post(body, tries + 1); }
+        diag.failed++;
+        throttled();
+        return false;
       }
-      if (res && !res.ok && tries < 2) { await sleep(600); return post(body, tries + 1); }
-      return !!(res && res.ok);
+      if (res && !res.ok) {
+        if (tries < 1) { await sleep(1500); return post(body, tries + 1); }
+        diag.failed++;
+        return false;
+      }
+      diag.sent++;
+      return true;
     } catch (_) {
-      if (tries < 3) { await sleep(800 * (tries + 1)); return post(body, tries + 1); }
+      diag.lastStatus = 'network error';
+      if (tries < 1) { await sleep(1500); return post(body, tries + 1); }
+      diag.failed++;
       return false;
     }
+  }
+
+  // Being rate-limited must never look like "nothing is happening".
+  function throttled() {
+    if (opened) { status('The relay is busy — messages may be delayed.'); return; }
+    fail('ratelimited', 'The relay is rate-limited right now (too many requests from your network). Wait a minute and try again, or get on the same Wi-Fi so a direct connection can be used.');
   }
 
   // Publish one app/handshake message, splitting anything over the service's size
   // limit into numbered parts (the end-of-game full log can be several KB).
   function publish(msg) {
     const body = JSON.stringify({ ...msg, __s: sid });
-    if (body.length <= MAX_BODY) { post(body); return; }
+    if (body.length <= MAX_BODY) return post(body);
     const id = token(8);
     const n = Math.ceil(body.length / MAX_BODY);
+    const parts = [];
     for (let i = 0; i < n; i++) {
-      post(JSON.stringify({ __p: id, i, n, s: body.slice(i * MAX_BODY, (i + 1) * MAX_BODY), __s: sid }));
+      parts.push(post(JSON.stringify({ __p: id, i, n, s: body.slice(i * MAX_BODY, (i + 1) * MAX_BODY), __s: sid })));
     }
+    return Promise.all(parts).then((r) => r.every(Boolean));
   }
 
   /* --------------------------- subscribing ---------------------------- */
 
   function subscribe(topic) {
+    inTopic = topic;
     if (!ES) { fail('unsupported', 'Online play needs an internet connection.'); return; }
     try {
-      sub = new ES(`${base}/${topic}/sse`);
+      sub = new ES(`${url}/${topic}/sse`);
     } catch (_) {
+      diag.sub = 'could not start';
       fail('relay', 'Could not reach the relay service.');
       return;
     }
+    diag.sub = 'connecting';
+    if ('onopen' in sub) sub.onopen = () => { diag.sub = 'listening'; resubs = 0; };
     sub.onmessage = (ev) => {
+      diag.sub = 'listening';
       let frame;
       try { frame = JSON.parse(ev.data); } catch (_) { return; }
       if (!frame || frame.event !== 'message' || !frame.message) return;
@@ -124,10 +175,27 @@ export function createRelayChannel({ base = RELAY_BASE, fetchImpl, EventSourceIm
       if (msg.__p) { reassemble(msg); return; }
       route(msg);
     };
-    // EventSource reconnects on its own; only report a hard failure before we are
-    // connected, so a transient blip mid-game doesn't end the match.
+    // A browser gives up on an EventSource for good when the server answers with
+    // an HTTP error (a 429 from the shared rate limit, say) — readyState goes to
+    // CLOSED and it never retries. Silently deaf is the worst possible state for
+    // a host waiting on a join request, so rebuild it ourselves.
     sub.onerror = () => {
-      if (!opened && !verdict) status('Trouble reaching the relay — still trying…');
+      const dead = sub && sub.readyState === 2;
+      diag.sub = dead ? 'dropped' : 'reconnecting';
+      if (!dead || closed) return;
+      if (resubs >= RESUB_MAX) {
+        diag.sub = 'gave up';
+        fail('relay', 'Lost the relay connection and could not get it back. Your network may be rate-limited — wait a minute and try again.');
+        return;
+      }
+      resubs++;
+      const delay = RESUB_MS * resubs;
+      status('Reconnecting to the relay…');
+      setTimeout(() => {
+        if (closed) return;
+        try { sub && sub.close(); } catch (_) {}
+        subscribe(inTopic);
+      }, delay);
     };
   }
 
@@ -221,6 +289,18 @@ export function createRelayChannel({ base = RELAY_BASE, fetchImpl, EventSourceIm
     onStatus(fn) { cbs.status = fn; },
     onJoinRequest(fn) { cbs.joinRequest = fn; },
 
+    diagnostics() {
+      return {
+        relay: url,
+        listening: inTopic ? `${inTopic} (${diag.sub})` : 'not listening',
+        publishing: outTopic || 'nowhere',
+        messagesSent: diag.sent,
+        sendsFailed: diag.failed,
+        timesThrottled: diag.throttled,
+        lastSendStatus: diag.lastStatus === null ? 'nothing sent yet' : String(diag.lastStatus),
+      };
+    },
+
     // Listen for a guest on `code`. Unlike the WebRTC host there is nothing to
     // negotiate, so the room is live as soon as we are subscribed.
     host(code, onReady) {
@@ -238,16 +318,26 @@ export function createRelayChannel({ base = RELAY_BASE, fetchImpl, EventSourceIm
       outTopic = relayTopic(code, 'h');     // guest publishes to the host's topic
       subscribe(relayTopic(code, 'g'));
       status('Asking the host to let you in…');
-      const ask = () => publish({ __t: H.JOIN, name: myName });
+      const ask = async () => {
+        joinTries++;
+        const ok = await publish({ __t: H.JOIN, name: myName });
+        // A JOIN that never left the building is the one failure the player must
+        // not be left guessing about: the host simply never heard them.
+        if (!ok && joinTries >= JOIN_MAX_TRIES && !verdict) {
+          stopTimers();
+          fail('unsent', 'Couldn\'t reach the relay to ask the host to let you in. Your network may be rate-limited — wait a minute and try again.');
+          return;
+        }
+        if (joinTries >= JOIN_MAX_TRIES && !verdict) {
+          stopTimers();
+          fail('timeout', 'No answer from that room. Check the code, or ask the host to create a new one.');
+        }
+      };
       ask();
       // The host may not be subscribed at the instant we ask, and a relayed message
-      // is fire-and-forget — so keep asking until we get an answer.
+      // is fire-and-forget — so ask again a few times, spaced out to stay inside
+      // the service's request budget.
       joinTimer = setInterval(() => { if (verdict) stopTimers(); else ask(); }, JOIN_RETRY_MS);
-      giveUp = setTimeout(() => {
-        if (verdict) return;
-        stopTimers();
-        fail('timeout', 'No answer from that room. Check the code, or ask the host to create a new one.');
-      }, JOIN_GIVEUP_MS);
     },
 
     send(msg) { if (opened) publish(msg); },
@@ -259,6 +349,7 @@ export function createRelayChannel({ base = RELAY_BASE, fetchImpl, EventSourceIm
       stopTimers();
       try { sub && sub.close(); } catch (_) {}
       sub = null;
+      diag.sub = 'closed';
     },
   };
 }

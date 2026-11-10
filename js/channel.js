@@ -173,10 +173,18 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
     isOpen() { return opened; },
     mode() { return mode; },
 
-    // Merged connection details for the "Connection details" readout.
+    // Merged connection details for the "Connection details" readout. Both halves
+    // matter: the direct half explains why peer-to-peer failed, the relay half
+    // explains whether the fallback is actually carrying anything.
     diagnostics() {
       const d = (direct && direct.diagnostics && direct.diagnostics()) || {};
-      return { ...d, transport: mode === 'relay' ? 'relay (via ntfy.sh)' : d.transport || 'direct (peer-to-peer)' };
+      const r = (relay && relay.diagnostics && relay.diagnostics()) || {};
+      return {
+        transport: mode === 'relay' ? 'relay (over HTTPS)' : (d.transport || 'direct (peer-to-peer)'),
+        ...d,
+        ...r,
+        listeningOn: [direct ? 'direct' : null, relay ? 'relay' : null].filter(Boolean).join(' + ') || 'nothing',
+      };
     },
 
     close() {
