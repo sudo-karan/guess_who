@@ -41,12 +41,23 @@ export function peerAvailable() {
 // A player can paste their own TURN credentials (e.g. a free Metered or Cloudflare
 // account) to make the direct connection work on hostile networks. Stored locally;
 // never sent anywhere but to their own TURN server.
+// Validate the shape before it ever reaches an RTCPeerConnection: a malformed
+// entry would make the constructor throw, which would break EVERY connection
+// (hosting included) with no way out but clearing site data.
 export function savedTurn() {
   try {
     const raw = localStorage.getItem(TURN_KEY);
     if (!raw) return null;
     const t = JSON.parse(raw);
-    return t && t.urls ? t : null;
+    const list = Array.isArray(t && t.urls) ? t.urls : [t && t.urls];
+    const urls = list.filter((u) => typeof u === 'string' && /^(turns?|stun):\S+$/.test(u.trim()));
+    if (!urls.length) return null;
+    const out = { urls: urls.length === 1 ? urls[0].trim() : urls.map((u) => u.trim()) };
+    if (typeof t.username === 'string' && typeof t.credential === 'string') {
+      out.username = t.username;
+      out.credential = t.credential;
+    }
+    return out;
   } catch (_) { return null; }
 }
 
@@ -70,7 +81,15 @@ export function iceConfig() {
 
 function defaultMakePeer(id) {
   const opts = { debug: 1, config: iceConfig() };
-  return id ? new window.Peer(id, opts) : new window.Peer(opts);
+  try {
+    return id ? new window.Peer(id, opts) : new window.Peer(opts);
+  } catch (_) {
+    // Belt and braces: if a custom ICE entry is still somehow unacceptable to
+    // this browser, fall back to PeerJS's own defaults rather than failing to
+    // create a peer at all.
+    const bare = { debug: 1 };
+    return id ? new window.Peer(id, bare) : new window.Peer(bare);
+  }
 }
 
 // Reserved handshake messages travel on the same channel as game messages but
@@ -98,7 +117,7 @@ const VERDICT_MS = 60000;  // host never answered the join request
 
 // Create an online channel. `makePeer` is injectable for tests; it defaults to
 // PeerJS in the browser. Returns an object with lifecycle callbacks.
-export function createOnlineChannel({ makePeer } = {}) {
+export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
   const mkPeer = makePeer || defaultMakePeer;
   let peer = null;
   let conn = null;          // the ACTIVE (accepted) connection
@@ -209,7 +228,7 @@ export function createOnlineChannel({ makePeer } = {}) {
         status('Room ready — share your code.');
         softClose(c);
       }
-    }, CONNECT_MS + 3000);
+    }, connectMs + 3000);
     const stop = () => { clearTimeout(fallback); clearTimeout(idle); };
     cleaners.add(stop);
 
@@ -258,7 +277,7 @@ export function createOnlineChannel({ makePeer } = {}) {
         stopTimers();
         unreachable('The data channel never opened' + (diag.ice ? ` (ICE: ${diag.ice})` : '') + '.');
       }
-    }, CONNECT_MS);
+    }, connectMs);
 
     c.on('open', () => {
       clearTimeout(openTimer);

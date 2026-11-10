@@ -90,10 +90,11 @@
             network blocks that, it automatically falls back to a relay — so play
             should still work. If you want the faster, private direct connection on
             a restrictive network, add your own TURN server below (it is saved only
-            in this browser).
+            in this browser). A <code>turns:</code> address on port 443 is the one
+            that gets through networks that block UDP.
           </p>
           <div class="nd-turn">
-            <input id="turn-url" placeholder="turn:example.com:3478" autocomplete="off" />
+            <input id="turn-url" placeholder="turns:example.com:443?transport=tcp" autocomplete="off" />
             <input id="turn-user" placeholder="username" autocomplete="off" />
             <input id="turn-pass" placeholder="password" autocomplete="off" />
             <button class="btn tiny" id="btn-save-turn" type="button">Save</button>
