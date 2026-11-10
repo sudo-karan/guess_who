@@ -109,6 +109,26 @@ body {
 .net-status.error { color: var(--red); }
 .net-status.ok { color: var(--green); }
 
+/* Connection diagnostics — hidden until something actually goes wrong. */
+.net-details { margin: 10px auto 0; max-width: 520px; font-size: .86rem; }
+.net-details > summary {
+  cursor: pointer; text-align: center; color: var(--ink-soft);
+  font-weight: 700; padding: 6px; border-radius: 10px;
+}
+.net-details > summary:hover { background: rgba(124, 92, 255, .08); color: var(--purple); }
+.net-details pre {
+  background: #f4f3fb; border: 1px solid #e3e0f2; border-radius: 12px;
+  padding: 10px 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-word;
+  font-size: .8rem; line-height: 1.5; color: var(--ink);
+}
+.nd-hint { color: var(--ink-soft); line-height: 1.5; margin: 8px 0; }
+.nd-turn { display: flex; flex-wrap: wrap; gap: 6px; }
+.nd-turn input {
+  flex: 1 1 120px; min-width: 0; padding: 8px 10px; font-size: .84rem;
+  border: 2px solid #e3e0f2; border-radius: 10px; font-family: inherit;
+}
+.nd-turn input:focus { outline: none; border-color: var(--purple); }
+
 /* ---- room browser ---- */
 .room-browser { margin-top: 20px; border-top: 2px dashed var(--line); padding-top: 16px; }
 .rb-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
