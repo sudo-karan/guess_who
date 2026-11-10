@@ -1,7 +1,9 @@
 // app.js — UI + orchestration for Guess Whoo!
 import { generateRoster, renderAvatar, TRAIT_LABELS, traitRows } from './characters.js';
 import { createEngine, BOARD_SIZE } from './engine.js';
-import { createOnlineChannel, createLocalPair, peerAvailable } from './net.js';
+import { createLocalPair, savedTurn, saveTurn } from './net.js';
+import { createGameChannel } from './channel.js';
+import { relayAvailable } from './relay.js';
 import { createLobby, ROOM_STATUS } from './lobby.js';
 import { commonTraitsText, netBatchesByTurnActor } from './loganalysis.js';
 import { robotSetup, openCandidates, chooseQuestion, shouldGuess, cardsToCrossOff, pickGuess } from './ai.js';
@@ -133,7 +135,7 @@ function clearFilters() { activeFilters = {}; }
 /* ------------------------------- home ------------------------------- */
 function initHome() {
   $('#btn-online').onclick = () => {
-    if (!peerAvailable()) toast('Online needs a connection — you can still Pass & Play.');
+    if (!relayAvailable()) toast('Online needs a connection — you can still Pass & Play.');
     $('#online-panel').classList.toggle('hidden');
     $('#how-panel').classList.add('hidden');
     // Start room discovery the moment the online panel is opened.
@@ -173,11 +175,54 @@ function initHome() {
     navigator.clipboard && navigator.clipboard.writeText(code).then(
       () => toast('Code copied!'), () => {});
   };
+
+  // Advanced escape hatch: your own TURN server, for a direct connection on a
+  // network that blocks peer-to-peer. Stored only in this browser.
+  const turn = savedTurn();
+  if (turn) {
+    $('#turn-url').value = [].concat(turn.urls)[0] || '';
+    $('#turn-user').value = turn.username || '';
+    $('#turn-pass').value = turn.credential || '';
+  }
+  $('#btn-save-turn').onclick = () => {
+    const urls = $('#turn-url').value.trim();
+    if (!urls) { saveTurn(null); toast('TURN server cleared.'); return; }
+    saveTurn({ urls, username: $('#turn-user').value.trim(), credential: $('#turn-pass').value.trim() });
+    toast('Saved — it will be used the next time you host or join.');
+  };
 }
 
 function setNetStatus(msg, kind = '') {
   const el = $('#net-status');
   el.textContent = msg; el.className = 'net-status ' + kind;
+}
+
+/* ------------------------- connection diagnostics ------------------------- */
+// Say which route the game found. Falling back to the relay is a success, not a
+// fault — but it should never look like one, or like a bug.
+function noteTransport() {
+  hideNetDetails();
+  if (G.channel && G.channel.mode && G.channel.mode() === 'relay') {
+    toast('🔁 Connected through the relay — your network blocked a direct link.');
+  }
+}
+
+// On a failure, show what actually happened rather than a dead end.
+function showNetDetails() {
+  const box = $('#net-details'), body = $('#net-details-body');
+  if (!box || !body) return;
+  const d = (G.channel && G.channel.diagnostics && G.channel.diagnostics()) || {};
+  const rows = { ...d, page: (typeof location !== 'undefined' && location.host) || 'local' };
+  body.textContent = Object.entries(rows)
+    .filter(([, v]) => v !== '' && v != null)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+  box.classList.remove('hidden');
+}
+
+function hideNetDetails() {
+  const box = $('#net-details');
+  if (box) { box.classList.add('hidden'); box.open = false; }
 }
 
 /* ------------------------------ lobby ------------------------------- */
@@ -186,7 +231,7 @@ let lobbyGotRooms = false;      // has the coordinator ever answered us?
 let lobbyWatchdog = null;
 function ensureLobby() {
   if (lobby) { lobby.refresh(); return; }
-  if (!peerAvailable()) {
+  if (!relayAvailable()) {
     renderRoomsMessage('Online room discovery needs an internet connection. You can still Pass & Play.');
     return;
   }
@@ -328,13 +373,14 @@ function hostOnline() {
   // Re-hosting must not leak a second room or leave the old game peer alive.
   teardownOnline();
   G.mode = 'online';
-  G.channel = createOnlineChannel();
+  G.channel = createGameChannel();
   const engine = makeOnlineEngine(true);
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
   G.channel.onJoinRequest((who, ctl) => showJoinApproval(who, ctl));
   G.channel.onOpen(() => {
     setNetStatus('Opponent connected!', 'ok');
+    noteTransport();
     if (lobby && hostedRoom) lobby.setStatus(hostedRoom, ROOM_STATUS.PLAYING);  // room now in-game
     const roster = generateRoster();          // host is authoritative for the cast
     setRoster(roster);
@@ -364,11 +410,11 @@ function joinOnline(codeArg) {
   // tear it down so we don't strand a dead, still-advertised room.
   teardownOnline();
   G.mode = 'online';
-  G.channel = createOnlineChannel();
+  G.channel = createGameChannel();
   const engine = makeOnlineEngine(false);
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
-  G.channel.onOpen(() => setNetStatus('Connected! Dealing the characters…', 'ok'));
+  G.channel.onOpen(() => { setNetStatus('Connected! Dealing the characters…', 'ok'); noteTransport(); });
   G.channel.onError(handleNetError);
   G.channel.join(code, name);
 }
@@ -398,7 +444,15 @@ function routeOnline(s) {
 function handleNetError(e) {
   const msg = (e && e.message) || 'Connection problem.';
   setNetStatus(msg, 'error');
-  if (screens.home.classList.contains('active')) return; // still in the lobby
+  if (screens.home.classList.contains('active')) {
+    // Still on the home screen: the attempt died before the match began. Stop
+    // advertising the room — otherwise it lingers in everyone's browser as an
+    // "Open" room whose code leads straight back to this same failure.
+    endHostedRoom();
+    $('#host-code').classList.add('hidden');
+    showNetDetails();
+    return;
+  }
 
   // Past the lobby: a dropped connection would otherwise leave this client stuck
   // forever (e.g. on "Awaiting result…"). Drive it to a terminal screen with a

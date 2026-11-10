@@ -1,29 +1,41 @@
 // lobby.js
-// Serverless room discovery for online play, built on the SAME PeerJS broker as
-// the game — no backend required.
+// Room discovery for online play — still with no backend of our own.
 //
-// One browser volunteers as the LOBBY COORDINATOR by claiming a fixed, well-known
-// peer id (`guesswho-v1-lobby`). Everyone else connects to it to publish the room
-// they are hosting and to browse the live list of open rooms. If the coordinator
-// leaves, a remaining client re-claims the id and becomes the new coordinator;
-// hosts re-publish so the list heals on its own.
+// This used to elect one browser as a "lobby coordinator" by claiming a fixed
+// PeerJS id, with everyone else connecting to it. That had two fatal flaws in the
+// real world: it needed a working peer-to-peer data channel just to SEE the room
+// list (the very thing that fails on restrictive networks), and the well-known id
+// was global — any stale or zombie tab anywhere could hold it and wedge discovery
+// for everybody.
 //
-// The room-registry and the coordinator's message handling are split out as pure,
-// dependency-free pieces so they can be unit-tested without a real network.
+// So discovery is now a plain broadcast feed over HTTPS. Every host repeats a
+// small "my room is open" beacon on one shared public topic; every browser listens
+// to that topic and keeps the rooms it has heard from recently. Nobody is in
+// charge, there is nothing to elect, and nothing to wedge: a host that goes away
+// simply stops beaconing and ages out of everyone's list.
+//
+// The room registry is kept as a pure, dependency-free piece so it can be
+// unit-tested without a network.
 
-export const LOBBY_ID = 'guesswho-v1-lobby';   // codes are 4 upper-case chars, so this never clashes
+import { RELAY_BASE } from './relay.js';
+
+export const LOBBY_TOPIC = 'guesswho-v1-lobby';
 
 // Room lifecycle as seen in the browser list.
 export const ROOM_STATUS = { OPEN: 'open', PLAYING: 'playing', ENDED: 'ended' };
 
+const BEACON_MS = 15000;    // how often a host re-announces
+const STALE_MS = 50000;     // drop a room we haven't heard from in this long
+const SWEEP_MS = 8000;      // how often we age the list
+
 /* --------------------------- pure room registry --------------------------- */
-// Tracks the set of live rooms keyed by code. Each entry remembers which peer
-// connection owns it so the coordinator can drop a host's rooms when it leaves.
+// Tracks the set of live rooms keyed by code. Each entry remembers who published
+// it and when it was last heard from, so silent rooms can be aged out.
 export function createRegistry() {
   const rooms = new Map();   // code -> { code, hostName, status, ownerId, ts }
 
   return {
-    // Add or replace a room. `ownerId` is the publishing connection's peer id.
+    // Add or replace a room. `ownerId` identifies the publisher.
     publish(ownerId, room, ts = 0) {
       if (!room || !room.code) return false;
       rooms.set(room.code, {
@@ -48,10 +60,16 @@ export function createRegistry() {
       for (const [code, r] of rooms) if (r.ownerId === ownerId) { rooms.delete(code); n++; }
       return n;
     },
+    // Drop rooms last heard from before `cutoff`; returns how many were removed.
+    expire(cutoff) {
+      let n = 0;
+      for (const [code, r] of rooms) if (r.ts < cutoff) { rooms.delete(code); n++; }
+      return n;
+    },
     has(code) { return rooms.has(code); },
     size() { return rooms.size; },
     clear() { rooms.clear(); },
-    // Public view (newest first), without the internal ownerId bookkeeping.
+    // Public view (newest first), without the internal bookkeeping.
     list() {
       return [...rooms.values()]
         .sort((a, b) => b.ts - a.ts)
@@ -60,195 +78,148 @@ export function createRegistry() {
   };
 }
 
-/* ----------------------- pure coordinator message logic ------------------- */
-// Handle one inbound message from a client connection, mutating `registry` and
-// `subscribers` and calling `broadcast()` when the room list changes. Kept pure
-// of PeerJS so it can be driven by fake connections in tests.
-//
-//   conn: { peer, send(msg) }   (PeerJS DataConnection shape)
-//   msg types (client -> coordinator):
-//     { t:'sub' }                       subscribe to the live list
-//     { t:'pub', room }                 publish/replace my room
-//     { t:'status', code, status }      change my room's status
-//     { t:'unpub', code }               remove my room
-export function handleCoordinatorMessage(registry, subscribers, conn, msg, broadcast, now = 0) {
-  if (!msg || typeof msg !== 'object') return;
-  switch (msg.t) {
-    case 'sub':
-      subscribers.add(conn);
-      // Send the current list straight to the new subscriber.
-      safeSend(conn, { t: 'rooms', rooms: registry.list() });
-      break;
-    case 'pub':
-      if (registry.publish(conn.peer, msg.room, now)) broadcast();
-      break;
-    case 'status':
-      if (registry.update(msg.code, msg.status)) broadcast();
-      break;
-    case 'unpub':
-      if (registry.remove(msg.code)) broadcast();
-      break;
-    default:
-      break;
+/* ------------------------- pure beacon interpretation --------------------- */
+// Apply one decoded feed message to the registry. Returns true if the visible
+// list changed. Kept free of I/O so it can be driven directly in tests.
+export function applyBeacon(registry, msg, now) {
+  if (!msg || typeof msg !== 'object') return false;
+  if (msg.t === 'room') {
+    if (!msg.code) return false;
+    if (msg.status === ROOM_STATUS.ENDED) return registry.remove(msg.code);
+    registry.publish(msg.code, {
+      code: msg.code, hostName: msg.hostName, status: msg.status,
+    }, now);
+    return true;
   }
+  if (msg.t === 'gone') return registry.remove(msg.code);
+  return false;
 }
 
-function safeSend(conn, msg) {
-  try { conn && conn.send(msg); } catch (_) { /* connection went away mid-send */ }
-}
+/* ------------------------------- the feed --------------------------------- */
+// `fetchImpl` / `EventSourceImpl` / `now` are injectable so this is testable.
+export function createLobby({
+  base = RELAY_BASE, topic = LOBBY_TOPIC, onRooms, onStatus,
+  fetchImpl, EventSourceImpl, now = () => Date.now(),
+} = {}) {
+  const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
+  const ES = EventSourceImpl || (typeof EventSource === 'function' ? EventSource : null);
 
-/* --------------------------- PeerJS lobby client -------------------------- */
-// Connects to (or becomes) the coordinator and exposes a tiny API the UI uses:
-//   publish(room) / setStatus(code,status) / unpublish(code) / refresh() / close()
-// Callbacks: onRooms(rooms[]) whenever the list changes; onStatus(kind) for state.
-//
-// `makePeer(id?)` is injected so tests can supply a fake; in the browser it
-// defaults to PeerJS. A monotonically increasing clock is used only to order the
-// list newest-first; it must not use Date.now() so behaviour stays deterministic.
-export function createLobby({ makePeer, onRooms = () => {}, onStatus = () => {} } = {}) {
-  const mkPeer = makePeer || defaultMakePeer;
-  const registry = createRegistry();     // populated only while we are coordinator
-  const subscribers = new Set();         // coordinator: client conns wanting the list
-  let peer = null;
-  let coordConn = null;                  // client: our connection to the coordinator
-  let role = null;                       // 'coordinator' | 'client' | null
-  let wantList = false;                  // did the UI ask to browse
-  let myRoom = null;                     // the room this browser hosts (to re-publish)
-  let seq = 0;                           // ordering clock
-  let closed = false;
-  let retryPending = false;
+  const registry = createRegistry();
+  const seen = new Set();
+  let sub = null;
+  let sweeper = null, beacon = null;
+  let mine = null;            // the room this browser is hosting, if any
+  let started = false, closed = false;
 
-  const tick = () => ++seq;
+  const emit = () => onRooms && onRooms(registry.list());
+  const say = (k) => onStatus && onStatus(k);
+  // A background timer must never be the reason a process (or a test run) stays
+  // alive; browsers ignore unref, Node honours it.
+  const every = (fn, ms) => {
+    const t = setInterval(fn, ms);
+    if (t && typeof t.unref === 'function') t.unref();
+    return t;
+  };
 
-  function broadcast() {
-    const rooms = registry.list();
-    onRooms(rooms);                                  // the coordinator browses too
-    const msg = { t: 'rooms', rooms };
-    for (const c of subscribers) safeSend(c, msg);
+  async function post(body, tries = 0) {
+    if (closed || !doFetch) return;
+    try {
+      const res = await doFetch(`${base}/${topic}`, { method: 'POST', body });
+      if (res && res.status === 429 && tries < 3) {
+        setTimeout(() => post(body, tries + 1), 2000 * (tries + 1));
+      }
+    } catch (_) {
+      if (tries < 2) setTimeout(() => post(body, tries + 1), 1500 * (tries + 1));
+    }
   }
 
-  // ---- coordinator role ----
-  function becomeCoordinator() {
-    role = 'coordinator';
-    onStatus('coordinator');
-    peer.on('connection', (c) => {
-      c.on('data', (d) => handleCoordinatorMessage(registry, subscribers, c, d, broadcast, tick()));
-      c.on('close', () => {
-        subscribers.delete(c);
-        if (registry.removeByOwner(c.peer)) broadcast();
-      });
-      c.on('error', () => {
-        // 'error' can fire without a clean 'close'; drop the client's rooms too so
-        // a departed host doesn't leave a ghost "Open" room that no longer connects.
-        subscribers.delete(c);
-        if (registry.removeByOwner(c.peer)) broadcast();
-      });
-    });
-    // As coordinator we serve ourselves directly (no self-connection needed).
-    if (myRoom) { registry.publish('self', myRoom, tick()); }
-    if (wantList || myRoom) broadcast();
+  const announce = () => { if (mine) post(JSON.stringify({ t: 'room', ...mine })); };
+
+  function take(raw, id) {
+    if (id) { if (seen.has(id)) return; seen.add(id); }
+    let msg;
+    try { msg = JSON.parse(raw); } catch (_) { return; }
+    if (applyBeacon(registry, msg, now())) emit();
   }
 
-  // ---- client role ----
-  function wireClientConn(c) {
-    coordConn = c;
-    c.on('open', () => {
-      role = 'client';
-      onStatus('client');
-      if (wantList) safeSend(c, { t: 'sub' });
-      if (myRoom) safeSend(c, { t: 'pub', room: myRoom });
-    });
-    c.on('data', (d) => { if (d && d.t === 'rooms') onRooms(d.rooms || []); });
-    c.on('close', () => { coordConn = null; scheduleReclaim(); });
-    c.on('error', () => { /* handled by close / peer error */ });
+  // Catch up on rooms announced just before this page opened, so the list is
+  // populated at once instead of after the next beacon.
+  async function catchUp() {
+    if (!doFetch) return;
+    try {
+      const res = await doFetch(`${base}/${topic}/json?poll=1&since=${Math.round(STALE_MS / 1000)}s`);
+      if (!res || !res.ok) return;
+      const text = await res.text();
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const frame = JSON.parse(line);
+          if (frame && frame.event === 'message' && frame.message) take(frame.message, frame.id);
+        } catch (_) { /* skip a bad line */ }
+      }
+      emit();
+    } catch (_) { say('error'); }
   }
 
-  function connectAsClient() {
-    peer = mkPeer();                          // random id
-    peer.on('open', () => {
-      if (closed) return;
-      wireClientConn(peer.connect(LOBBY_ID, { reliable: true }));
-    });
-    peer.on('error', (err) => {
-      // Coordinator vanished between claim-failure and connect: try to become it.
-      if (isUnavailablePeer(err)) scheduleReclaim();
-      else onStatus('error');
-    });
-  }
-
-  // The coordinator left (or was never reachable): after a short randomised
-  // backoff, try to claim the id ourselves; if it's taken, connect as a client.
-  function scheduleReclaim() {
-    if (closed || retryPending) return;
-    retryPending = true;
-    onStatus('reconnecting');
-    // Vary the delay by our seq so simultaneous clients don't all collide.
-    const delay = 300 + (seq % 7) * 120;
-    setTimeout(() => { retryPending = false; if (!closed) start(); }, delay);
-  }
-
-  function start() {
-    try { peer && peer.destroy(); } catch (_) {}
-    peer = null; coordConn = null; role = null;
-    // Rebuild from scratch on every (re-)election so a stale in-memory registry
-    // can't resurrect dead rooms after we take over as coordinator.
-    registry.clear();
-    subscribers.clear();
-    // Try to claim the well-known coordinator id.
-    peer = mkPeer(LOBBY_ID);
-    peer.on('open', () => { if (!closed) becomeCoordinator(); });
-    peer.on('error', (err) => {
-      if (isIdTaken(err)) { try { peer.destroy(); } catch (_) {} connectAsClient(); }
-      else if (isUnavailablePeer(err)) scheduleReclaim();
-      else onStatus('error');
-    });
+  function listen() {
+    if (!ES) { say('error'); return; }
+    try { sub = new ES(`${base}/${topic}/sse`); } catch (_) { say('error'); return; }
+    sub.onmessage = (ev) => {
+      let frame;
+      try { frame = JSON.parse(ev.data); } catch (_) { return; }
+      if (frame && frame.event === 'message' && frame.message) take(frame.message, frame.id);
+    };
+    sub.onerror = () => { if (!registry.size()) say('error'); };
   }
 
   return {
-    start() { closed = false; start(); },
-    // Announce (or update) the room this browser is hosting. A browser can only
-    // advertise ONE room, so re-publishing with a new code drops the previous one.
+    start() {
+      if (started || closed) return;
+      started = true;
+      listen();
+      catchUp();
+      sweeper = every(() => {
+        if (registry.expire(now() - STALE_MS)) emit();
+      }, SWEEP_MS);
+      beacon = every(announce, BEACON_MS);
+    },
+
+    // Re-read the list on demand (the Refresh button).
+    refresh() { catchUp(); announce(); },
+
+    // Start advertising the room this browser is hosting.
     publish(room) {
-      const prev = myRoom;
-      myRoom = { code: room.code, hostName: room.hostName, status: room.status || ROOM_STATUS.OPEN };
-      if (prev && prev.code !== myRoom.code) {
-        if (role === 'coordinator') registry.remove(prev.code);
-        else if (coordConn) safeSend(coordConn, { t: 'unpub', code: prev.code });
-      }
-      if (role === 'coordinator') { registry.publish('self', myRoom, tick()); broadcast(); }
-      else if (coordConn) safeSend(coordConn, { t: 'pub', room: myRoom });
+      if (!room || !room.code) return;
+      if (mine && mine.code !== room.code) this.unpublish(mine.code);
+      mine = { code: room.code, hostName: room.hostName || 'Player', status: room.status || ROOM_STATUS.OPEN };
+      // Show it locally straight away — don't wait for our own beacon to come back.
+      registry.publish(mine.code, mine, now());
+      emit();
+      announce();
     },
+
     setStatus(code, status) {
-      if (myRoom && myRoom.code === code) myRoom.status = status;
-      if (role === 'coordinator') { if (registry.update(code, status)) broadcast(); }
-      else if (coordConn) safeSend(coordConn, { t: 'status', code, status });
+      if (mine && mine.code === code) { mine.status = status; announce(); }
+      if (registry.update(code, status)) emit();
     },
+
     unpublish(code) {
-      if (myRoom && myRoom.code === code) myRoom = null;
-      if (role === 'coordinator') { if (registry.remove(code)) broadcast(); }
-      else if (coordConn) safeSend(coordConn, { t: 'unpub', code });
+      post(JSON.stringify({ t: 'gone', code }));
+      if (mine && mine.code === code) mine = null;
+      if (registry.remove(code)) emit();
     },
-    // Ask to browse the live list.
-    refresh() {
-      wantList = true;
-      if (role === 'coordinator') broadcast();
-      else if (coordConn) safeSend(coordConn, { t: 'sub' });
-    },
-    role() { return role; },
+
+    rooms() { return registry.list(); },
+
     close() {
+      // Say goodbye BEFORE shutting down — post() is a no-op once closed, and a
+      // missed goodbye leaves a dead room sitting in everyone's list until it
+      // ages out.
+      if (mine) { post(JSON.stringify({ t: 'gone', code: mine.code })); mine = null; }
       closed = true;
-      try { peer && peer.destroy(); } catch (_) {}
-      peer = null; coordConn = null; role = null; subscribers.clear();
+      clearInterval(sweeper); clearInterval(beacon);
+      try { sub && sub.close(); } catch (_) {}
+      sub = null;
     },
   };
 }
-
-/* ------------------------------- peer helpers ----------------------------- */
-function defaultMakePeer(id) {
-  const P = (typeof window !== 'undefined') && window.Peer;
-  if (typeof P !== 'function') throw new Error('PeerJS unavailable');
-  return id ? new P(id, { debug: 1 }) : new P({ debug: 1 });
-}
-function errType(err) { return String((err && (err.type || err.message)) || err || ''); }
-function isIdTaken(err) { return errType(err) === 'unavailable-id'; }
-function isUnavailablePeer(err) { return errType(err) === 'peer-unavailable'; }

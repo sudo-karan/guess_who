@@ -79,6 +79,27 @@
         </div>
 
         <p id="net-status" class="net-status"></p>
+
+        <!-- Shown only when a connection fails, so a stuck player can see WHY
+             (and send us something useful) instead of a dead end. -->
+        <details id="net-details" class="net-details hidden">
+          <summary>Connection details</summary>
+          <pre id="net-details-body"></pre>
+          <p class="nd-hint">
+            Guess Who tries a direct browser-to-browser connection first. If your
+            network blocks that, it automatically falls back to a relay — so play
+            should still work. If you want the faster, private direct connection on
+            a restrictive network, add your own TURN server below (it is saved only
+            in this browser). A <code>turns:</code> address on port 443 is the one
+            that gets through networks that block UDP.
+          </p>
+          <div class="nd-turn">
+            <input id="turn-url" placeholder="turns:example.com:443?transport=tcp" autocomplete="off" />
+            <input id="turn-user" placeholder="username" autocomplete="off" />
+            <input id="turn-pass" placeholder="password" autocomplete="off" />
+            <button class="btn tiny" id="btn-save-turn" type="button">Save</button>
+          </div>
+        </details>
       </div>
 
       <!-- Robot difficulty picker -->

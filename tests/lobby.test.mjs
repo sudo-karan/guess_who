@@ -1,11 +1,9 @@
-// Unit tests for the serverless lobby: room registry, coordinator message
-// handling, and the become-coordinator / join-as-client / re-election flow,
-// driven by an in-memory fake PeerJS broker (no real network).
+// Unit tests for room discovery: the pure registry, pure beacon interpretation,
+// and the broadcast feed, driven by an in-memory fake of ntfy.sh (no network).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  createRegistry, handleCoordinatorMessage, createLobby, LOBBY_ID, ROOM_STATUS,
-} from '../js/lobby.js';
+import { createRegistry, applyBeacon, createLobby, ROOM_STATUS, LOBBY_TOPIC } from '../js/lobby.js';
+import { createFakeNtfy, until, flush } from './fake-ntfy.mjs';
 
 /* ------------------------------ registry ------------------------------ */
 test('registry: publish, list newest-first, update, remove', () => {
@@ -46,200 +44,126 @@ test('registry: publish ignores malformed rooms', () => {
   assert.equal(r.size(), 0);
 });
 
-/* ---------------------- coordinator message handling ------------------- */
-function fakeConn(peerId) {
-  const sent = [];
-  return { peer: peerId, send: (m) => sent.push(m), sent };
-}
-
-test('coordinator: sub sends current list; pub/status/unpub broadcast', () => {
-  const reg = createRegistry();
-  const subs = new Set();
-  let broadcasts = 0;
-  const broadcast = () => { broadcasts++; };
-
-  const sub = fakeConn('c1');
-  handleCoordinatorMessage(reg, subs, sub, { t: 'sub' }, broadcast, 1);
-  assert.equal(subs.size, 1);
-  assert.deepEqual(sub.sent.at(-1), { t: 'rooms', rooms: [] });   // immediate snapshot
-
-  const host = fakeConn('h1');
-  handleCoordinatorMessage(reg, subs, host, { t: 'pub', room: { code: 'AAAA', hostName: 'Ann' } }, broadcast, 2);
-  assert.equal(reg.size(), 1);
-  assert.equal(broadcasts, 1);
-
-  handleCoordinatorMessage(reg, subs, host, { t: 'status', code: 'AAAA', status: ROOM_STATUS.PLAYING }, broadcast, 3);
-  assert.equal(reg.list()[0].status, ROOM_STATUS.PLAYING);
-  assert.equal(broadcasts, 2);
-
-  handleCoordinatorMessage(reg, subs, host, { t: 'unpub', code: 'AAAA' }, broadcast, 4);
-  assert.equal(reg.size(), 0);
-  assert.equal(broadcasts, 3);
+test('registry: expire drops only rooms last heard from before the cutoff', () => {
+  const r = createRegistry();
+  r.publish('p1', { code: 'OLD1' }, 1000);
+  r.publish('p2', { code: 'NEW1' }, 9000);
+  assert.equal(r.expire(5000), 1);
+  assert.deepEqual(r.list().map((x) => x.code), ['NEW1']);
 });
 
-test('coordinator: garbage messages are ignored', () => {
-  const reg = createRegistry();
-  const subs = new Set();
-  let broadcasts = 0;
-  handleCoordinatorMessage(reg, subs, fakeConn('c'), null, () => broadcasts++, 1);
-  handleCoordinatorMessage(reg, subs, fakeConn('c'), { t: 'nope' }, () => broadcasts++, 1);
-  assert.equal(broadcasts, 0);
-  assert.equal(reg.size(), 0);
+/* --------------------------- beacon semantics -------------------------- */
+test('beacons: a room announcement adds it, "gone" and "ended" remove it', () => {
+  const r = createRegistry();
+  assert.equal(applyBeacon(r, { t: 'room', code: 'AAAA', hostName: 'Ann' }, 100), true);
+  assert.equal(r.list()[0].hostName, 'Ann');
+
+  applyBeacon(r, { t: 'room', code: 'AAAA', hostName: 'Ann', status: ROOM_STATUS.PLAYING }, 200);
+  assert.equal(r.list()[0].status, ROOM_STATUS.PLAYING);
+
+  assert.equal(applyBeacon(r, { t: 'gone', code: 'AAAA' }, 300), true);
+  assert.equal(r.size(), 0);
+
+  applyBeacon(r, { t: 'room', code: 'BBBB' }, 400);
+  applyBeacon(r, { t: 'room', code: 'BBBB', status: ROOM_STATUS.ENDED }, 500);
+  assert.equal(r.size(), 0, 'an ended room leaves the list');
 });
 
-/* --------------------------- fake PeerJS broker ------------------------ */
-// Minimal async model of the PeerJS signalling + data-channel behaviour:
-// claiming an id, id-collision errors, connecting, and message passing.
-const flush = (ms = 0) => new Promise((r) => setTimeout(r, ms));
-// Poll until `pred()` is truthy (robust to CPU contention / timer stretching).
-async function until(pred, ms = 5000) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) { if (pred()) return true; await flush(10); }
-  return pred();
+test('beacons: garbage is ignored', () => {
+  const r = createRegistry();
+  assert.equal(applyBeacon(r, null, 1), false);
+  assert.equal(applyBeacon(r, { t: 'room' }, 1), false);      // no code
+  assert.equal(applyBeacon(r, { t: 'nope', code: 'AAAA' }, 1), false);
+  assert.equal(r.size(), 0);
+});
+
+/* ------------------------------ live feed ------------------------------ */
+function feed(ntfy, extra = {}) {
+  return createLobby({
+    fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl, ...extra,
+  });
 }
 
-function createFakeBroker() {
-  const claimed = new Map();       // id -> peer
-  let idc = 0;
-  const later = (fn) => setTimeout(fn, 0);
+test('feed: a hosted room reaches another browsers list, and leaving removes it', async () => {
+  const ntfy = createFakeNtfy();
+  const seenB = [];
+  const has = (code) => seenB.length && seenB.at(-1).some((x) => x.code === code);
 
-  function makeConn(remoteId) {
-    const h = {};
-    let closed = false;
-    const c = {
-      peer: remoteId,
-      other: null,
-      on(ev, fn) { (h[ev] || (h[ev] = [])).push(fn); return c; },
-      emit(ev, a) { (h[ev] || []).forEach((fn) => fn(a)); },
-      send(msg) { later(() => c.other && c.other.emit('data', msg)); },
-      _shutdown() { if (closed) return; closed = true; c.emit('close'); },
-      close() { later(() => { c._shutdown(); c.other && c.other._shutdown(); }); },
-    };
-    return c;
-  }
-
-  function makePeer(id) {
-    const h = {};
-    let myId = id || ('rand-' + (++idc));
-    let destroyed = false;
-    const conns = [];                              // every conn this peer owns
-    const peer = {
-      get id() { return myId; },
-      on(ev, fn) { (h[ev] || (h[ev] = [])).push(fn); return peer; },
-      emit(ev, a) { (h[ev] || []).forEach((fn) => fn(a)); },
-      connect(targetId) {
-        const clientConn = makeConn(targetId);
-        conns.push(clientConn);
-        later(() => {
-          const target = claimed.get(targetId);
-          if (!target || destroyed) { peer.emit('error', { type: 'peer-unavailable' }); return; }
-          const serverConn = makeConn(myId);
-          target._track(serverConn);
-          clientConn.other = serverConn; serverConn.other = clientConn;
-          target.emit('connection', serverConn);
-          later(() => { serverConn.emit('open'); clientConn.emit('open'); });
-        });
-        return clientConn;
-      },
-      _track(conn) { conns.push(conn); },
-      // Real PeerJS closes a peer's connections on destroy; the remote ends fire 'close'.
-      destroy() {
-        destroyed = true;
-        if (claimed.get(myId) === peer) claimed.delete(myId);
-        for (const c of conns.splice(0)) later(() => { c._shutdown(); c.other && c.other._shutdown(); });
-      },
-    };
-    later(() => {
-      if (destroyed) return;
-      if (id && claimed.has(id)) peer.emit('error', { type: 'unavailable-id' });
-      else { claimed.set(myId, peer); peer.emit('open', myId); }
-    });
-    return peer;
-  }
-
-  return { makePeer, claimed };
-}
-
-/* ------------------------- lobby: coordinator/client ------------------- */
-test('lobby: first is coordinator, second joins as client and sees published rooms', async () => {
-  const broker = createFakeBroker();
-  const roomsA = []; const roomsB = [];
-  const statusA = []; const statusB = [];
-
-  const has = (arr, code) => arr.length && arr.at(-1).some((x) => x.code === code);
-
-  const A = createLobby({ makePeer: broker.makePeer, onRooms: (r) => roomsA.push(r), onStatus: (s) => statusA.push(s) });
-  A.start();
-  await until(() => A.role() === 'coordinator');
-  assert.equal(A.role(), 'coordinator');
-  assert.ok(statusA.includes('coordinator'));
-  assert.equal(broker.claimed.has(LOBBY_ID), true);
-
-  const B = createLobby({ makePeer: broker.makePeer, onRooms: (r) => roomsB.push(r), onStatus: (s) => statusB.push(s) });
+  const B = feed(ntfy, { onRooms: (r) => seenB.push(r) });
   B.start();
-  await until(() => B.role() === 'client');
-  assert.equal(B.role(), 'client');
 
-  // B browses and publishes a room; both A (coordinator) and B (subscriber) see it.
-  B.refresh();
-  B.publish({ code: 'WXYZ', hostName: 'Bo' });
-  await until(() => has(roomsA, 'WXYZ') && has(roomsB, 'WXYZ'));
-  assert.ok(has(roomsA, 'WXYZ'), 'coordinator sees clients room');
-  assert.ok(has(roomsB, 'WXYZ'), 'subscriber gets the list');
+  const A = feed(ntfy);
+  A.start();
+  A.publish({ code: 'WXYZ', hostName: 'Ann' });
 
-  // Coordinator publishes its own room; the client subscriber sees it too.
-  A.refresh();
-  A.publish({ code: 'AAAA', hostName: 'Ann' });
-  await until(() => has(roomsB, 'AAAA'));
-  assert.ok(has(roomsB, 'AAAA'));
+  await until(() => has('WXYZ'));
+  assert.ok(has('WXYZ'), 'the other browser sees the room');
+  assert.equal(seenB.at(-1).find((x) => x.code === 'WXYZ').hostName, 'Ann');
 
-  // Status change propagates.
-  B.setStatus('WXYZ', ROOM_STATUS.PLAYING);
-  await until(() => roomsB.at(-1).find((x) => x.code === 'WXYZ')?.status === ROOM_STATUS.PLAYING);
-  assert.equal(roomsB.at(-1).find((x) => x.code === 'WXYZ').status, ROOM_STATUS.PLAYING);
+  A.setStatus('WXYZ', ROOM_STATUS.PLAYING);
+  await until(() => seenB.at(-1).find((x) => x.code === 'WXYZ')?.status === ROOM_STATUS.PLAYING);
+  assert.equal(seenB.at(-1).find((x) => x.code === 'WXYZ').status, ROOM_STATUS.PLAYING);
 
-  // Unpublish removes it.
-  B.unpublish('WXYZ');
-  await until(() => !has(roomsB, 'WXYZ'));
-  assert.ok(!has(roomsB, 'WXYZ'));
-
-  A.close(); B.close();
+  A.close();                       // host leaves -> says goodbye
+  await until(() => !has('WXYZ'));
+  assert.ok(!has('WXYZ'), 'the departed hosts room disappears');
+  B.close();
 });
 
-test('lobby: a departed host disappears from the list', async () => {
-  const broker = createFakeBroker();
-  const roomsA = [];
-  const has = (code) => roomsA.length && roomsA.at(-1).some((x) => x.code === code);
-  const A = createLobby({ makePeer: broker.makePeer, onRooms: (r) => roomsA.push(r) });
-  A.start(); await until(() => A.role() === 'coordinator');
-  A.refresh();
-
-  const B = createLobby({ makePeer: broker.makePeer });
-  B.start(); await until(() => B.role() === 'client');
-  B.publish({ code: 'BBBB', hostName: 'Bo' });
-  await until(() => has('BBBB'));
-  assert.ok(has('BBBB'));
-
-  B.close();                       // host leaves entirely
-  await until(() => !has('BBBB'));
-  assert.ok(!has('BBBB'), 'coordinator drops the departed hosts room');
+test('feed: your own room shows in your own list immediately', async () => {
+  const ntfy = createFakeNtfy();
+  const seen = [];
+  const A = feed(ntfy, { onRooms: (r) => seen.push(r) });
+  A.start();
+  A.publish({ code: 'AAAA', hostName: 'Ann' });
+  // No round trip required: the host must be able to confirm it is advertised.
+  assert.ok(seen.at(-1).some((x) => x.code === 'AAAA'), 'listed without waiting for the feed');
   A.close();
 });
 
-test('lobby: client re-elects itself when the coordinator leaves', async () => {
-  const broker = createFakeBroker();
-  const statusB = [];
-  const A = createLobby({ makePeer: broker.makePeer });
-  A.start(); await until(() => A.role() === 'coordinator');
+test('feed: a page opened later catches up on rooms announced before it', async () => {
+  const ntfy = createFakeNtfy();
+  const A = feed(ntfy);
+  A.start();
+  A.publish({ code: 'EARL', hostName: 'Ann' });
+  await flush(10);
 
-  const B = createLobby({ makePeer: broker.makePeer, onStatus: (s) => statusB.push(s) });
-  B.start(); await until(() => B.role() === 'client');
+  const seenB = [];
+  const B = feed(ntfy, { onRooms: (r) => seenB.push(r) });
+  B.start();                       // joins the feed only now
+  await until(() => seenB.length && seenB.at(-1).some((x) => x.code === 'EARL'));
+  assert.ok(seenB.at(-1).some((x) => x.code === 'EARL'), 'history fills the list at once');
+  A.close(); B.close();
+});
 
-  A.close();                       // coordinator disappears; frees the id
-  await until(() => statusB.includes('reconnecting'));
-  assert.ok(statusB.includes('reconnecting'));
-  await until(() => B.role() === 'coordinator');   // waits out the backoff + reclaim
-  assert.equal(B.role(), 'coordinator', 'B took over as the new coordinator');
-  assert.equal(broker.claimed.has(LOBBY_ID), true);
-  B.close();
+test('feed: a host that goes silent ages out of the list', async () => {
+  const ntfy = createFakeNtfy();
+  const seen = [];
+  let clock = 1000;
+  const B = feed(ntfy, { onRooms: (r) => seen.push(r), now: () => clock });
+  B.start();
+
+  const A = feed(ntfy);
+  A.start();
+  A.publish({ code: 'GHST', hostName: 'Ann' });
+  await until(() => seen.length && seen.at(-1).some((x) => x.code === 'GHST'));
+
+  clock += 60000;                  // a minute of silence (no beacons)
+  await until(() => !seen.at(-1).some((x) => x.code === 'GHST'), 12000);
+  assert.ok(!seen.at(-1).some((x) => x.code === 'GHST'), 'stale rooms are swept');
+  A.close(); B.close();
+});
+
+test('feed: publishing a new room retires the previous one (one room per host)', async () => {
+  const ntfy = createFakeNtfy();
+  const seen = [];
+  const A = feed(ntfy, { onRooms: (r) => seen.push(r) });
+  A.start();
+  A.publish({ code: 'ONE1', hostName: 'Ann' });
+  A.publish({ code: 'TWO2', hostName: 'Ann' });
+  await flush(20);
+  const codes = seen.at(-1).map((x) => x.code);
+  assert.deepEqual(codes, ['TWO2'], 'only the current room is advertised');
+  assert.equal(LOBBY_TOPIC, 'guesswho-v1-lobby');
+  A.close();
 });
