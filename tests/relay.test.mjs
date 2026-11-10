@@ -153,6 +153,60 @@ test('relay: a subscription killed by the service is rebuilt, not left deaf', as
   host.close(); guest.close();
 });
 
+test('relay: a guest that reloads and tries again DOES get the host prompted again', async () => {
+  // THE reported bug. The "already prompted" latch was permanent and keyed to
+  // nothing, so after one unanswered request the host never saw another popup —
+  // not even from the same player reloading, who arrives with a new session id.
+  const ntfy = createFakeNtfy();
+  const opts = { fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl };
+  const host = createRelayChannel(opts);
+  const prompts = [];
+  host.onJoinRequest((who) => prompts.push(who));   // captured, never answered
+  host.host('AB3U');
+
+  const g1 = createRelayChannel(opts);
+  g1.join('AB3U', 'Bo');
+  await until(() => prompts.length === 1);
+  g1.close();                                        // the player gives up and reloads
+
+  // The abandoned requester stops re-publishing, so it ages out and the newcomer
+  // can take over. (Liveness is 2 x the join retry interval.)
+  const g2 = createRelayChannel(opts);
+  await flush(11000);
+  g2.join('AB3U', 'Bo');
+  await until(() => prompts.length === 2, 20000);
+  assert.equal(prompts.length, 2, 'the host is asked again');
+  assert.deepEqual(prompts, ['Bo', 'Bo']);
+  host.close(); g2.close();
+});
+
+test('relay: a live requester is not bumped by a stranger', async () => {
+  const ntfy = createFakeNtfy();
+  const opts = { fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl };
+  const host = createRelayChannel(opts);
+  const prompts = [];
+  let firstCtl = null;
+  host.onJoinRequest((who, ctl) => { prompts.push(who); if (!firstCtl) firstCtl = ctl; });
+  host.host('AB3U');
+
+  const g1 = createRelayChannel(opts);
+  g1.join('AB3U', 'Ana');
+  await until(() => prompts.length === 1);
+
+  const g2 = createRelayChannel(opts);     // a stranger from the room list
+  const g2Err = [];
+  g2.onError((e) => g2Err.push(e));
+  g2.join('AB3U', 'Zed');
+  await flush(300);
+  assert.deepEqual(prompts, ['Ana'], 'the pending request is not replaced while it is alive');
+  assert.deepEqual(g2Err, [], 'and the stranger is not told the host declined');
+
+  firstCtl.accept();
+  await until(() => host.isOpen());
+  assert.ok(host.isOpen());
+  host.close(); g1.close(); g2.close();
+});
+
 test('relay: close stops delivery', async () => {
   const ntfy = createFakeNtfy();
   const { host, guest, st } = pair(ntfy);

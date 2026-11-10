@@ -86,6 +86,8 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
   let peerSid = null;         // the token we accept messages from
   let verdict = false;        // guest: has the host answered
   let prompted = false;       // host: have we already raised this join request
+  let promptedSid = null;     // ...and whose it was
+  let lastJoinAt = 0;         // when that requester was last heard from
   let joinTimer = null, joinTries = 0;
   let resubs = 0;
   const seen = new Set();     // ntfy message ids already handled (SSE may re-deliver)
@@ -226,12 +228,28 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
           if (from !== peerSid) publish({ __t: H.FULL, to: from });
           return;
         }
-        if (prompted) return;                          // JOIN repeats until answered
+        // A guest that is still waiting re-publishes its JOIN every few seconds,
+        // so silence means it has gone. Without that liveness rule the "already
+        // prompted" latch was permanent: once the host had been asked once and
+        // had not answered, no later request — not even the same player
+        // reloading, who arrives with a fresh session id — was ever raised
+        // again, and the host simply never saw another popup.
+        const at = Date.now();
+        if (prompted) {
+          if (from === promptedSid) { lastJoinAt = at; return; }   // same guest, still waiting
+          if (at - lastJoinAt < JOIN_RETRY_MS * 2) return;         // the pending one is alive: wait
+          // Otherwise the pending requester has gone quiet — let this one take over.
+          // Deliberately no DENY/FULL to the newcomer: both are terminal and would
+          // tell them the host refused when the host never saw them.
+        }
         prompted = true;
+        promptedSid = from;
+        lastJoinAt = at;
         peerSid = from;
         const who = String(msg.name || 'A player').slice(0, 14);
+        const free = () => { prompted = false; promptedSid = null; peerSid = null; };
         const accept = () => {
-          if (opened || closed) return;
+          if (opened || closed) { free(); return; }   // committed nothing: don't wedge the room
           opened = true;
           publish({ __t: H.ACCEPT, to: from });
           status('Connected!');
@@ -239,7 +257,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
         };
         const deny = () => {
           publish({ __t: H.DENY, to: from });
-          prompted = false; peerSid = null;            // the room is free again
+          free();                                      // the room is free again
         };
         if (cbs.joinRequest) cbs.joinRequest(who, { accept, deny });
         else accept();

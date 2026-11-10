@@ -34,6 +34,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
 
   let direct = null, relay = null;
   let active = null;          // the transport that won
+  let directDead = false;     // the broker failed; only the relay can carry this room
   let opened = false;
   let done = false;           // terminal error already reported
   let mode = 'direct';        // 'direct' | 'relay'
@@ -48,17 +49,31 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
 
   const shut = (c) => { if (c) { try { c.close(); } catch (_) {} } };
 
-  // Point one transport's callbacks at ours. `claim` runs when this transport is
-  // the one that got a player, so the other can be dropped.
+  // Point one transport's callbacks at ours. `claim` makes this transport the
+  // active one and drops the other — which is why it must happen ONLY when this
+  // transport has actually opened (see onOpen below), never merely because the
+  // host clicked Approve. An accept can decline to commit (the guest's direct
+  // connection died while the host deliberated), and claiming first would have
+  // already torn down the transport the guest is really on, leaving the host
+  // listening on nothing with no error shown.
   function wire(ch, label, claim) {
     ch.onData((m) => { if (active === ch) cbs.data && cbs.data(m); });
     ch.onStatus((t) => { if (!active || active === ch) status(label ? `${label} ${t}` : t); });
     ch.onJoinRequest((who, ctl) => {
       if (opened && active !== ch) { ctl.deny(); return; }   // already playing elsewhere
-      cbs.joinRequest ? cbs.joinRequest(who, {
-        accept: () => { claim(); ctl.accept(); },
-        deny: () => ctl.deny(),
-      }) : (claim(), ctl.accept());
+      const accept = () => {
+        // Re-checked here as well as on arrival: approvals are serialised through
+        // one modal queue, so this can be answered long after the room filled up
+        // on the other transport.
+        if (opened && active !== ch) { ctl.deny(); return; }
+        ctl.accept();
+        // Both transports call back into onOpen synchronously from a successful
+        // accept. If nothing opened, the accept quietly committed nothing — say
+        // so rather than leaving the host staring at an unchanged screen.
+        if (!opened) status('That player had already left — the room is still open.');
+      };
+      if (cbs.joinRequest) cbs.joinRequest(who, { accept, deny: () => ctl.deny() });
+      else accept();
     });
     ch.onOpen(() => {
       if (opened && active !== ch) { shut(ch); return; }
@@ -87,6 +102,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
       }
       if (active === direct || opened) { fail(e.type, e.message); return; }
       // The broker is unreachable but the relay can still carry the whole game.
+      directDead = true;
       if (!settled) { settled = true; openRelayHost(code, onCode); }
     });
 
@@ -101,6 +117,18 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
     if (canRelay()) {
       relay = mkRelay();
       wire(relay, 'Relay:', () => { active = relay; mode = 'relay'; shut(direct); direct = null; });
+      // Without this the host's relay failures went nowhere at all: a throttled or
+      // dead relay subscription left the room silently deaf to join requests while
+      // it carried on advertising itself as open.
+      relay.onError((e) => {
+        if (opened && active === relay) { fail(e.type, e.message); return; }  // a live game died
+        if (opened) return;                        // playing over direct; relay is moot
+        if (!directDead) {                         // the direct route may still work
+          status('Relay unavailable — a direct connection can still get through.');
+          return;
+        }
+        fail(e.type, e.message);                   // nothing left to listen on
+      });
       relay.host(code);
     }
     onCode && onCode(code);
