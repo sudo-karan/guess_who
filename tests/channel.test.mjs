@@ -158,6 +158,65 @@ test('channel: the host advertises ONE code on both transports', async () => {
   host.close();
 });
 
+test('channel: approving a dead direct connection must not destroy the live relay', async () => {
+  // The host listens on both transports. Approving a guest whose DIRECT
+  // connection has already died used to tear the relay down first and commit
+  // nothing — leaving the host listening on nothing, with no error shown and a
+  // room still advertised as open.
+  const ntfy = createFakeNtfy();
+  const relayOpts = { fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl };
+
+  // A direct transport that raises a join request and then declines to commit,
+  // exactly as net.js does for a connection that closed while the host decided.
+  let raise = null;
+  const deadOnAccept = () => {
+    const cbs = {};
+    return {
+      onData(f) { cbs.data = f; }, onOpen(f) { cbs.open = f; }, onError(f) { cbs.error = f; },
+      onStatus(f) { cbs.status = f; }, onUnreachable(f) { cbs.unreach = f; },
+      onJoinRequest(f) { cbs.join = f; },
+      diagnostics: () => ({ transport: 'direct (peer-to-peer)' }),
+      host(code, onCode) {
+        setTimeout(() => onCode && onCode(code), 0);
+        raise = () => cbs.join && cbs.join('Ghost', { accept: () => {}, deny: () => {} });
+      },
+      join() {}, send() {}, isOpen() { return false; }, close() {},
+    };
+  };
+
+  let code = null, hostOpen = false;
+  const statuses = [];
+  const host = createGameChannel({ relayOpts, makeDirect: deadOnAccept });
+  host.onOpen(() => { hostOpen = true; });
+  host.onStatus((s) => statuses.push(s));
+  let ctl = null;
+  host.onJoinRequest((who, c) => { ctl = c; });
+  host.host((c) => { code = c; });
+  await until(() => code !== null && raise !== null);
+  await flush(20);
+
+  raise();
+  await until(() => ctl !== null);
+  ctl.accept();                      // the host approves; the direct accept no-ops
+  await flush(50);
+
+  assert.equal(hostOpen, false, 'nothing opened, as expected');
+  assert.match(host.diagnostics().listeningOn, /relay/, 'the relay is STILL listening');
+  assert.ok(statuses.some((s) => /already left/i.test(s)), 'and the host is told why nothing happened');
+
+  // Proof it still works: a real guest can now arrive over the relay.
+  const guest = createGameChannel({ relayOpts, makeDirect: () => deadDirect() });
+  let guestOpen = false;
+  guest.onOpen(() => { guestOpen = true; });
+  ctl = null;
+  guest.join(code, 'Bo');
+  await until(() => ctl !== null, 20000);
+  ctl.accept();
+  await until(() => hostOpen && guestOpen, 20000);
+  assert.ok(hostOpen && guestOpen, 'a later guest still gets in');
+  host.close(); guest.close();
+});
+
 test('channel: a blocked guest with no relay available gets a clear error, not a hang', async () => {
   const st = { errors: [] };
   const guest = createGameChannel({ makeDirect: () => deadDirect() });

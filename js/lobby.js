@@ -24,9 +24,21 @@ export const LOBBY_TOPIC = 'guesswho-v1-lobby';
 // Room lifecycle as seen in the browser list.
 export const ROOM_STATUS = { OPEN: 'open', PLAYING: 'playing', ENDED: 'ended' };
 
-const BEACON_MS = 15000;    // how often a host re-announces
-const STALE_MS = 50000;     // drop a room we haven't heard from in this long
-const SWEEP_MS = 8000;      // how often we age the list
+// MESSAGE BUDGET. ntfy.sh allows roughly 60 requests per 5 minutes and 250
+// publishes per day PER IP — and two players behind one router share that. A
+// 15-second beacon spends 240 publishes an hour, which burns the whole daily
+// budget in about an hour of hosting and then silently 429s everything,
+// including the join requests that actually matter.
+//
+// So hosts do not beacon continuously. A room is announced when it opens, when
+// its status changes and when it closes, plus a slow keepalive so a long-running
+// room doesn't age out. Anyone opening the room list asks once ("who's there?")
+// and live hosts answer once — a couple of requests per browse instead of a
+// steady drip from every host on the internet.
+const KEEPALIVE_MS = 240000;   // 4 min: ~15 publishes/hour for a host, not 240
+const STALE_MS = 600000;       // 10 min without a word before a room is dropped
+const SWEEP_MS = 30000;        // how often we age the list
+const WHO_COOLDOWN_MS = 10000; // a host answers at most one "who's there?" per 10s
 
 /* --------------------------- pure room registry --------------------------- */
 // Tracks the set of live rooms keyed by code. Each entry remembers who published
@@ -83,6 +95,7 @@ export function createRegistry() {
 // list changed. Kept free of I/O so it can be driven directly in tests.
 export function applyBeacon(registry, msg, now) {
   if (!msg || typeof msg !== 'object') return false;
+  if (msg.t === 'who') return false;          // a request, not a room: handled by the feed
   if (msg.t === 'room') {
     if (!msg.code) return false;
     if (msg.status === ROOM_STATUS.ENDED) return registry.remove(msg.code);
@@ -100,6 +113,7 @@ export function applyBeacon(registry, msg, now) {
 export function createLobby({
   base = RELAY_BASE, topic = LOBBY_TOPIC, onRooms, onStatus,
   fetchImpl, EventSourceImpl, now = () => Date.now(),
+  staleMs = STALE_MS, sweepMs = SWEEP_MS, keepaliveMs = KEEPALIVE_MS,
 } = {}) {
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
   const ES = EventSourceImpl || (typeof EventSource === 'function' ? EventSource : null);
@@ -109,6 +123,7 @@ export function createLobby({
   let sub = null;
   let sweeper = null, beacon = null;
   let mine = null;            // the room this browser is hosting, if any
+  let lastWho = 0;            // when we last answered a "who's there?"
   let started = false, closed = false;
 
   const emit = () => onRooms && onRooms(registry.list());
@@ -121,24 +136,38 @@ export function createLobby({
     return t;
   };
 
+  // One spaced retry at most. Room discovery is a convenience — joining by code
+  // always works — so it must never spend the request budget that the join
+  // handshake itself needs.
   async function post(body, tries = 0) {
-    if (closed || !doFetch) return;
+    if (closed || !doFetch) return false;
     try {
       const res = await doFetch(`${base}/${topic}`, { method: 'POST', body });
-      if (res && res.status === 429 && tries < 3) {
-        setTimeout(() => post(body, tries + 1), 2000 * (tries + 1));
+      if (res && res.status === 429) {
+        if (tries < 1) { setTimeout(() => post(body, tries + 1), 4000); return false; }
+        say('throttled');
+        return false;
       }
+      return !!(res && res.ok);
     } catch (_) {
-      if (tries < 2) setTimeout(() => post(body, tries + 1), 1500 * (tries + 1));
+      if (tries < 1) setTimeout(() => post(body, tries + 1), 2000);
+      return false;
     }
   }
 
   const announce = () => { if (mine) post(JSON.stringify({ t: 'room', ...mine })); };
 
-  function take(raw, id) {
+  function take(raw, id, live) {
     if (id) { if (seen.has(id)) return; seen.add(id); }
     let msg;
     try { msg = JSON.parse(raw); } catch (_) { return; }
+    // Someone just opened the room list and is asking who is hosting. Answer once
+    // if we are, rate-limited so a busy lobby can't make hosts shout over
+    // each other. Only live traffic: a cached "who" from history is long answered.
+    if (msg && msg.t === 'who') {
+      if (live && mine && now() - lastWho > WHO_COOLDOWN_MS) { lastWho = now(); announce(); }
+      return;
+    }
     if (applyBeacon(registry, msg, now())) emit();
   }
 
@@ -147,14 +176,15 @@ export function createLobby({
   async function catchUp() {
     if (!doFetch) return;
     try {
-      const res = await doFetch(`${base}/${topic}/json?poll=1&since=${Math.round(STALE_MS / 1000)}s`);
+      const res = await doFetch(`${base}/${topic}/json?poll=1&since=${Math.round(staleMs / 1000)}s`);
       if (!res || !res.ok) return;
       const text = await res.text();
       for (const line of text.split('\n')) {
         if (!line.trim()) continue;
         try {
           const frame = JSON.parse(line);
-          if (frame && frame.event === 'message' && frame.message) take(frame.message, frame.id);
+          // History, not live traffic: never answer a cached "who's there?".
+          if (frame && frame.event === 'message' && frame.message) take(frame.message, frame.id, false);
         } catch (_) { /* skip a bad line */ }
       }
       emit();
@@ -167,10 +197,14 @@ export function createLobby({
     sub.onmessage = (ev) => {
       let frame;
       try { frame = JSON.parse(ev.data); } catch (_) { return; }
-      if (frame && frame.event === 'message' && frame.message) take(frame.message, frame.id);
+      if (frame && frame.event === 'message' && frame.message) take(frame.message, frame.id, true);
     };
     sub.onerror = () => { if (!registry.size()) say('error'); };
   }
+
+  // "Who's there?" — hosts answer once, so a page that just opened learns about
+  // rooms whose announcement has already scrolled out of the cached history.
+  const askWho = () => post(JSON.stringify({ t: 'who' }));
 
   return {
     start() {
@@ -178,14 +212,17 @@ export function createLobby({
       started = true;
       listen();
       catchUp();
+      askWho();
       sweeper = every(() => {
-        if (registry.expire(now() - STALE_MS)) emit();
-      }, SWEEP_MS);
-      beacon = every(announce, BEACON_MS);
+        if (registry.expire(now() - staleMs)) emit();
+      }, sweepMs);
+      // A slow keepalive only: a host that beacons constantly exhausts the
+      // service's per-IP budget and takes the join handshake down with it.
+      beacon = every(announce, keepaliveMs);
     },
 
     // Re-read the list on demand (the Refresh button).
-    refresh() { catchUp(); announce(); },
+    refresh() { catchUp(); askWho(); announce(); },
 
     // Start advertising the room this browser is hosting.
     publish(room) {

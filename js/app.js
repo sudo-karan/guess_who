@@ -184,6 +184,7 @@ function initHome() {
     $('#turn-user').value = turn.username || '';
     $('#turn-pass').value = turn.credential || '';
   }
+  wireNetDetails();
   $('#btn-save-turn').onclick = () => {
     const urls = $('#turn-url').value.trim();
     if (!urls) { saveTurn(null); toast('TURN server cleared.'); return; }
@@ -207,22 +208,39 @@ function noteTransport() {
   }
 }
 
-// On a failure, show what actually happened rather than a dead end.
-function showNetDetails() {
+// Show what is actually happening. Available (collapsed) for the whole of an
+// online attempt and opened automatically on a failure — a room that just sits
+// there waiting never raises an error, which is precisely when a player most
+// needs to see whether anything is listening.
+function showNetDetails(open = true) {
   const box = $('#net-details'), body = $('#net-details-body');
   if (!box || !body) return;
+  renderNetDetails();
+  box.classList.remove('hidden');
+  if (open) box.open = true;
+}
+
+function renderNetDetails() {
+  const body = $('#net-details-body');
+  if (!body) return;
   const d = (G.channel && G.channel.diagnostics && G.channel.diagnostics()) || {};
   const rows = { ...d, page: (typeof location !== 'undefined' && location.host) || 'local' };
   body.textContent = Object.entries(rows)
     .filter(([, v]) => v !== '' && v != null)
     .map(([k, v]) => `${k}: ${v}`)
     .join('\n');
-  box.classList.remove('hidden');
 }
 
 function hideNetDetails() {
   const box = $('#net-details');
   if (box) { box.classList.add('hidden'); box.open = false; }
+}
+
+// Re-read the live state each time the player opens the panel, so what they copy
+// to us is current rather than a snapshot from when it was first revealed.
+function wireNetDetails() {
+  const box = $('#net-details');
+  if (box) box.addEventListener('toggle', () => { if (box.open) renderNetDetails(); });
 }
 
 /* ------------------------------ lobby ------------------------------- */
@@ -255,6 +273,7 @@ function onLobbyStatus(kind) {
   const el = $('#room-list');
   if (!el || el.querySelector('.room-card')) return;
   if (kind === 'reconnecting') renderRoomsMessage('Reconnecting to the room list…');
+  else if (kind === 'throttled') renderRoomsMessage('The room list is rate-limited right now — hosting and joining by code still work.');
   else if (kind === 'error') renderRoomsMessage('Couldn\'t reach the room list right now — hosting and joining by code still work.');
 }
 
@@ -305,17 +324,23 @@ function showJoinApproval(who, ctl) {
 async function drainApprovals() {
   if (approvalBusy) return;
   approvalBusy = true;
-  while (approvalQueue.length) {
-    const { who, ctl } = approvalQueue.shift();
-    // eslint-disable-next-line no-await-in-loop
-    const ok = await confirmModal({
-      title: '🙋 Join request',
-      body: `<b>${escapeHTML(who)}</b> wants to join your room. Let them in?`,
-      okText: 'Approve', cancelText: 'Decline',
-    });
-    if (ok) ctl.accept(); else ctl.deny();
+  // try/finally matters more than it looks: if anything in here threw, the busy
+  // flag would stay set and EVERY later join request would be queued and silently
+  // never shown — the host just never gets a popup.
+  try {
+    while (approvalQueue.length) {
+      const { who, ctl } = approvalQueue.shift();
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await confirmModal({
+        title: '🙋 Join request',
+        body: `<b>${escapeHTML(who)}</b> wants to join your room. Let them in?`,
+        okText: 'Approve', cancelText: 'Decline',
+      });
+      try { if (ok) ctl.accept(); else ctl.deny(); } catch (_) { /* that guest is gone */ }
+    }
+  } finally {
+    approvalBusy = false;
   }
-  approvalBusy = false;
 }
 
 // Mark this browser's hosted room as finished and drop it from the lobby.
@@ -391,6 +416,7 @@ function hostOnline() {
   G.channel.host((code) => {
     $('#host-code').classList.remove('hidden');
     $('#code-value').textContent = code;
+    showNetDetails(false);   // available, collapsed: lets the host confirm it is listening
     // Advertise the room so friends can find it in the browser.
     ensureLobby();
     hostedRoom = code;
@@ -398,6 +424,7 @@ function hostOnline() {
   });
 }
 
+let joinWaitHint = null;
 function joinOnline(codeArg) {
   const code = String(codeArg || $('#join-code').value).trim().toUpperCase();
   if (!code) { setNetStatus('Enter a room code first.', 'error'); return; }
@@ -414,9 +441,19 @@ function joinOnline(codeArg) {
   const engine = makeOnlineEngine(false);
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
-  G.channel.onOpen(() => { setNetStatus('Connected! Dealing the characters…', 'ok'); noteTransport(); });
+  G.channel.onOpen(() => {
+    clearTimeout(joinWaitHint);
+    setNetStatus('Connected! Dealing the characters…', 'ok');
+    noteTransport();
+  });
   G.channel.onError(handleNetError);
   G.channel.join(code, name);
+  // Waiting on a host who may never have heard us raises no error at all, so
+  // surface the details panel once the wait stops looking normal.
+  clearTimeout(joinWaitHint);
+  joinWaitHint = setTimeout(() => {
+    if (!(G.channel && G.channel.isOpen())) showNetDetails(false);
+  }, 10000);
 }
 
 // Route online state changes to the right screen.

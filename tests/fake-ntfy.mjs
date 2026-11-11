@@ -9,7 +9,9 @@ export async function until(pred, ms = 5000) {
   return pred();
 }
 
-export function createFakeNtfy({ base = 'https://ntfy.sh' } = {}) {
+// `throttleAfter`: start answering publishes with 429 once this many have been
+// made, mirroring ntfy.sh's per-IP rate limit.
+export function createFakeNtfy({ base = 'https://ntfy.sh', throttleAfter = Infinity } = {}) {
   const topics = new Map();      // name -> { msgs: [], subs: Set<fn> }
   let idc = 0;
   let posts = 0;
@@ -26,6 +28,9 @@ export function createFakeNtfy({ base = 'https://ntfy.sh' } = {}) {
       return { ok: true, status: 200, text: async () => body };
     }
     posts++;
+    if (posts > throttleAfter) {
+      return { ok: false, status: 429, text: async () => 'rate limited' };
+    }
     const t = topic(name);
     const msg = { id: 'm' + (++idc), time: 0, event: 'message', topic: name, message: String(opts.body) };
     t.msgs.push(msg);
@@ -33,16 +38,37 @@ export function createFakeNtfy({ base = 'https://ntfy.sh' } = {}) {
     return { ok: true, status: 200, text: async () => '' };
   };
 
+  const live = new Set();
   class FakeEventSource {
     constructor(url) {
       this.name = nameOf(url);
+      this.readyState = 1;                   // OPEN
       this.onmessage = null;
       this.onerror = null;
+      this.onopen = null;
       this._h = (m) => { if (this.onmessage) this.onmessage({ data: JSON.stringify(m) }); };
       topic(this.name).subs.add(this._h);
+      live.add(this);
+      setTimeout(() => { if (this.onopen) this.onopen(); }, 0);
     }
-    close() { topic(this.name).subs.delete(this._h); }
+    // Mimic a browser giving up for good on an HTTP error: readyState CLOSED and
+    // no automatic retry.
+    _kill() {
+      this.readyState = 2;                   // CLOSED
+      topic(this.name).subs.delete(this._h);
+      live.delete(this);
+      if (this.onerror) this.onerror({});
+    }
+    close() { this.readyState = 2; topic(this.name).subs.delete(this._h); live.delete(this); }
   }
 
-  return { fetchImpl, EventSourceImpl: FakeEventSource, topics, postCount: () => posts };
+  return {
+    fetchImpl,
+    EventSourceImpl: FakeEventSource,
+    topics,
+    postCount: () => posts,
+    // Kill every open subscription on a topic, as a 429'd reconnect would.
+    killSubscriptions: (name) => { for (const es of [...live]) if (es.name === name) es._kill(); },
+    liveCount: () => live.size,
+  };
 }
