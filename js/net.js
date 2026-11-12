@@ -109,7 +109,7 @@ const FRIENDLY = {
   'invalid-key': 'Online play is misconfigured on this build.',
   webrtc: 'Your browser couldn\'t set up the connection.',
 };
-const friendly = (type) => FRIENDLY[type] || 'Connection problem — please try again.';
+const friendly = (type) => FRIENDLY[type] || 'Connection problem. Please try again.';
 
 const BROKER_MS = 12000;   // no answer from the signalling server -> offline?
 const CONNECT_MS = 9000;   // data channel never opened -> this network can't do P2P
@@ -168,7 +168,7 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
       // stray onlooker's failed negotiation must not be mistaken for our own
       // game dying — and a genuine failure on the live connection arrives as a
       // close on that connection anyway.
-      if (pc.iceConnectionState === 'failed' && !opened) unreachable('ICE failed — no usable network path.');
+      if (pc.iceConnectionState === 'failed' && !opened) unreachable('ICE failed, no usable network path.');
     };
     try {
       pc.addEventListener('iceconnectionstatechange', note);
@@ -229,7 +229,7 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
     // and go back to advertising the room.
     const idle = setTimeout(() => {
       if (!settled && !opened && c.open !== true) {
-        status('Room ready — share your code.');
+        status('Room ready. Share your code.');
         softClose(c);
       }
     }, connectMs + 3000);
@@ -294,7 +294,7 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
       giveUp = setTimeout(() => {
         if (!verdict) {
           stopTimers();
-          fail('timeout', 'No response from the host — they may not have answered your request. Try again.');
+          fail('timeout', 'No response from the host. They may not have answered your request. Try again.');
         }
       }, VERDICT_MS);
     });
@@ -424,7 +424,7 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         // reconnect() re-fires 'open'. Announcing the code again would re-publish
         // the room and reset the host's screen mid-game.
         if (opened) { status('Reconnected.'); healthy(); return; }
-        status('Room ready — share your code.');
+        status('Room ready. Share your code.');
         onCode && onCode(room);
       });
       p.on('connection', (c) => { status('Player joining…'); wireHostConn(c); });

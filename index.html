@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Guess Whoo! — a colourful two-player guessing game</title>
+  <title>Guess Whoo! · a colourful two-player guessing game</title>
   <meta name="description" content="A colourful, two-player Guess Who game. Play online with a room code or pass-and-play on one device." />
   <link rel="stylesheet" href="styles.css" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%237c5cff'/%3E%3Ctext y='72' x='50' font-size='60' text-anchor='middle'%3E%3F%3C/text%3E%3C/svg%3E" />
@@ -87,7 +87,7 @@
           <pre id="net-details-body"></pre>
           <p class="nd-hint">
             Guess Who tries a direct browser-to-browser connection first. If your
-            network blocks that, it automatically falls back to a relay — so play
+            network blocks that, it automatically falls back to a relay, so play
             should still work. If you want the faster, private direct connection on
             a restrictive network, add your own TURN server below (it is saved only
             in this browser). A <code>turns:</code> address on port 443 is the one
@@ -121,7 +121,7 @@
           <li><b>Choose your secret.</b> Pick <b>1</b> of your 20 to be your hidden character.</li>
           <li><b>Take turns.</b> On your turn, ask a yes/no question about a trait, then <b>either</b>:</li>
           <ul>
-            <li>🚫 <b>Disable</b> the characters that don't fit — but once you start disabling you <b>can't guess</b> this turn.</li>
+            <li>🚫 <b>Disable</b> the characters that don't fit. But once you start disabling you <b>can't guess</b> this turn.</li>
             <li>🎯 <b>Guess</b> the opponent's secret. Right = you win. Wrong = you lose!</li>
           </ul>
           <li><b>Watch the counts.</b> After each turn you can see how many cards your opponent has left <b>open</b> vs <b>crossed out</b>.</li>
@@ -135,7 +135,7 @@
     <section id="screen-setup" class="screen">
       <header class="bar">
         <div class="bar-title"><span id="setup-player">Player 1</span> · Build your board</div>
-        <div class="bar-step" id="setup-step">Step 1 of 2 — pick 20 characters</div>
+        <div class="bar-step" id="setup-step">Step 1 of 2 · pick 20 characters</div>
       </header>
       <div class="setup-hint" id="setup-hint">
         Tap characters to add them to your board. <b><span id="pick-count">0</span>/20</b> chosen.
@@ -181,7 +181,7 @@
         <aside class="filters">
           <div class="side-block filter-block">
             <h4>Filters 🔦</h4>
-            <p class="filter-hint">Tap traits to light up the cards that match — pick several to narrow it down. Numbers show how many are left.</p>
+            <p class="filter-hint">Tap traits to light up the cards that match. Pick several to narrow it down. Numbers show how many are left.</p>
             <div id="filter-panel" class="filter-panel"></div>
           </div>
         </aside>
@@ -241,7 +241,7 @@
     </div>
   </div>
 
-  <!-- "It's your turn" popup (online) — auto-dismisses after 3s -->
+  <!-- "It's your turn" popup (online), auto-dismisses after 3s -->
   <div id="turn-popup" class="turn-popup hidden">
     <div class="tp-card">
       <span class="tp-emoji">🎲</span>
@@ -254,7 +254,7 @@
   <div id="qbuilder" class="modal-overlay hidden">
     <div class="modal qb-modal">
       <h3>🧩 Build a question</h3>
-      <p class="qb-hint">Pick trait(s) to ask about — your rival answers yes/no. You can pick several. Prefer to ask out loud? Use the chat instead.</p>
+      <p class="qb-hint">Pick trait(s) to ask about, and your rival answers yes/no. You can pick several. Prefer to ask out loud? Use the chat instead.</p>
       <div id="qb-panel" class="qb-panel"></div>
       <div id="qb-summary" class="qb-summary"></div>
       <div class="modal-actions qb-actions">
