@@ -444,7 +444,7 @@ export function createEngine({ isHost, myName, now }) {
         // board the receiver has already started building for the next round.
         if (state.phase === 'over') {
           resetForRematch();
-          log('Opponent wants a rematch — new round!');
+          log('Opponent wants a rematch. New round!');
         }
         break;
       }

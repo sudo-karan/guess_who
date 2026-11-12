@@ -134,7 +134,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
 
   // Being rate-limited must never look like "nothing is happening".
   function throttled() {
-    if (opened) { status('The relay is busy — messages may be delayed.'); return; }
+    if (opened) { status('The relay is busy, so messages may be delayed.'); return; }
     fail('ratelimited', 'The relay is rate-limited right now (too many requests from your network). Wait a minute and try again, or get on the same Wi-Fi so a direct connection can be used.');
   }
 
@@ -211,7 +211,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
       // capped backoff. Before the match, a few attempts then an honest error.
       if (!opened && resubs >= RESUB_MAX) {
         diag.sub = 'gave up';
-        fail('relay', 'Lost the relay connection and could not get it back. Your network may be rate-limited — wait a minute and try again.');
+        fail('relay', 'Lost the relay connection and could not get it back. Your network may be rate-limited. Wait a minute and try again.');
         return;
       }
       resubs++;
@@ -386,7 +386,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
         // not be left guessing about: the host simply never heard them.
         if (!ok && joinTries >= JOIN_MAX_TRIES && !verdict) {
           stopTimers();
-          fail('unsent', 'Couldn\'t reach the relay to ask the host to let you in. Your network may be rate-limited — wait a minute and try again.');
+          fail('unsent', 'Couldn\'t reach the relay to ask the host to let you in. Your network may be rate-limited. Wait a minute and try again.');
           return;
         }
         if (joinTries >= JOIN_MAX_TRIES && !verdict) {
@@ -406,7 +406,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
     send(msg) {
       if (!opened) return;
       Promise.resolve(publish(msg)).then((ok) => {
-        if (ok === false) fail('unsent', 'A move couldn\'t be sent — the relay is busy. It will be retried.');
+        if (ok === false) fail('unsent', 'A move couldn\'t be sent because the relay is busy. It will be retried.');
       });
     },
 

@@ -84,7 +84,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
         // Both transports call back into onOpen synchronously from a successful
         // accept. If nothing opened, the accept quietly committed nothing — say
         // so rather than leaving the host staring at an unchanged screen.
-        if (!opened) status('That player had already left — the room is still open.');
+        if (!opened) status('That player had already left. The room is still open.');
       };
       if (cbs.joinRequest) cbs.joinRequest(who, { accept, deny: () => ctl.deny() });
       else accept();
@@ -138,7 +138,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
         if (opened && active === relay) { fail(e.type, e.message); return; }  // a live game died
         if (opened) return;                        // playing over direct; relay is moot
         if (!directDead) {                         // the direct route may still work
-          status('Relay unavailable — a direct connection can still get through.');
+          status('Relay unavailable, but a direct connection can still get through.');
           return;
         }
         fail(e.type, e.message);                   // nothing left to listen on
@@ -163,7 +163,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
         return;
       }
       mode = 'relay';
-      status('Direct connection blocked — connecting through the relay…');
+      status('Direct connection blocked, connecting through the relay…');
       relay = mkRelay();
       wire(relay, '', () => { active = relay; });
       relay.onError((e) => {

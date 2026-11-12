@@ -3,6 +3,7 @@ import { generateRoster, renderAvatar, TRAIT_LABELS, traitRows } from './charact
 import { createEngine, BOARD_SIZE } from './engine.js';
 import { createLocalPair, savedTurn, saveTurn } from './net.js';
 import { createGameChannel } from './channel.js';
+import { createReliableChannel } from './reliable.js';
 import { relayAvailable } from './relay.js';
 import { createLobby, ROOM_STATUS } from './lobby.js';
 import { commonTraitsText, netBatchesByTurnActor } from './loganalysis.js';
@@ -135,7 +136,7 @@ function clearFilters() { activeFilters = {}; }
 /* ------------------------------- home ------------------------------- */
 function initHome() {
   $('#btn-online').onclick = () => {
-    if (!relayAvailable()) toast('Online needs a connection — you can still Pass & Play.');
+    if (!relayAvailable()) toast('Online needs a connection. You can still Pass & Play.');
     $('#online-panel').classList.toggle('hidden');
     $('#how-panel').classList.add('hidden');
     // Start room discovery the moment the online panel is opened.
@@ -189,7 +190,7 @@ function initHome() {
     const urls = $('#turn-url').value.trim();
     if (!urls) { saveTurn(null); toast('TURN server cleared.'); return; }
     saveTurn({ urls, username: $('#turn-user').value.trim(), credential: $('#turn-pass').value.trim() });
-    toast('Saved — it will be used the next time you host or join.');
+    toast('Saved. It will be used the next time you host or join.');
   };
 }
 
@@ -204,7 +205,7 @@ function setNetStatus(msg, kind = '') {
 function noteTransport() {
   hideNetDetails();
   if (G.channel && G.channel.mode && G.channel.mode() === 'relay') {
-    toast('🔁 Connected through the relay — your network blocked a direct link.');
+    toast('🔁 Connected through the relay, because your network blocked a direct link.');
   }
 }
 
@@ -262,7 +263,7 @@ function ensureLobby() {
   clearTimeout(lobbyWatchdog);
   lobbyWatchdog = setTimeout(() => {
     if (!lobbyGotRooms) {
-      renderRoomsMessage('Couldn\'t reach the shared room list. Share your room code directly — joining by code still works.');
+      renderRoomsMessage('Couldn\'t reach the shared room list. Share your room code directly, which still works.');
     }
   }, 12000);
 }
@@ -273,8 +274,8 @@ function onLobbyStatus(kind) {
   const el = $('#room-list');
   if (!el || el.querySelector('.room-card')) return;
   if (kind === 'reconnecting') renderRoomsMessage('Reconnecting to the room list…');
-  else if (kind === 'throttled') renderRoomsMessage('The room list is rate-limited right now — hosting and joining by code still work.');
-  else if (kind === 'error') renderRoomsMessage('Couldn\'t reach the room list right now — hosting and joining by code still work.');
+  else if (kind === 'throttled') renderRoomsMessage('The room list is rate-limited right now. Hosting and joining by code still work.');
+  else if (kind === 'error') renderRoomsMessage('Couldn\'t reach the room list right now. Hosting and joining by code still work.');
 }
 
 function renderRoomsMessage(msg) {
@@ -290,7 +291,7 @@ function renderRooms(rooms) {
   lobbyGotRooms = true;
   const shown = (rooms || []).filter((r) => r.status !== ROOM_STATUS.ENDED);
   if (!shown.length) {
-    renderRoomsMessage('No open rooms yet — host one above and share the code, or wait for a friend to appear here.');
+    renderRoomsMessage('No open rooms yet. Host one above and share the code, or wait for a friend to appear here.');
     return;
   }
   el.innerHTML = shown.map((r) => {
@@ -369,11 +370,11 @@ function makeOnlineEngine(isHost) {
   engine.on('change', (s) => routeOnline(s));
   engine.on('ask', (who) => noticeModal({
     title: `💬 ${who} is asking a question`,
-    body: `<b>${escapeHTML(who)}</b> chose to ask a question this turn. Answer them (use the chat if you like) — they can't guess this turn.`,
+    body: `<b>${escapeHTML(who)}</b> chose to ask a question this turn. Answer them (use the chat if you like). They can't guess this turn.`,
     okText: 'Got it',
   }));
   engine.on('question', ({ question }) => showAnswerUI(engine, question));
-  engine.on('answer', ({ text }) => toast('💬 Rival answered — ' + text));
+  engine.on('answer', ({ text }) => toast('💬 Rival answered: ' + text));
   activeEngine = engine;
   return engine;
 }
@@ -402,7 +403,7 @@ function hostOnline() {
   // Re-hosting must not leak a second room or leave the old game peer alive.
   teardownOnline();
   G.mode = 'online';
-  G.channel = createGameChannel();
+  G.channel = createReliableChannel(createGameChannel());
   const engine = makeOnlineEngine(true);
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
@@ -434,7 +435,7 @@ function joinOnline(codeArg) {
   const code = String(codeArg || $('#join-code').value).trim().toUpperCase();
   if (!code) { setNetStatus('Enter a room code first.', 'error'); return; }
   if (hostedRoom && code === hostedRoom) {
-    setNetStatus("That's your own room — share the code with a friend so they can join.", 'error');
+    setNetStatus("That's your own room. Share the code with a friend so they can join.", 'error');
     return;
   }
   const name = ($('#online-name').value || '').trim().slice(0, 14) || 'Player 2';
@@ -442,7 +443,7 @@ function joinOnline(codeArg) {
   // tear it down so we don't strand a dead, still-advertised room.
   teardownOnline();
   G.mode = 'online';
-  G.channel = createGameChannel();
+  G.channel = createReliableChannel(createGameChannel());
   const engine = makeOnlineEngine(false);
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
@@ -523,7 +524,7 @@ let netGraceTimer = null;
 function softNetTrouble(msg) {
   const el = $('#net-banner');
   if (el) {
-    el.textContent = '⚠️ ' + msg + ' Trying to reconnect — your game is still here.';
+    el.textContent = '⚠️ ' + msg + ' Trying to reconnect. Your game is still here.';
     el.classList.remove('hidden');
   }
   if (netGraceTimer) return;              // already counting down
@@ -536,7 +537,7 @@ function softNetTrouble(msg) {
     if (G.mode === 'online' && activeEngine === forGame && activeEngine
         && activeEngine.state.phase !== 'over') {
       showDisconnected('🔌', 'Connection lost',
-        'We lost the connection and couldn\'t get it back. Your opponent may still be waiting — '
+        'We lost the connection and couldn\'t get it back. Your opponent may still be waiting, so '
         + 'check your internet and start a new room.');
     }
   }, NET_GRACE_MS);
@@ -563,7 +564,7 @@ function showDisconnected(emoji, title, sub) {
   $('#over-emoji').textContent = emoji || '🔌';
   $('#over-title').textContent = title || 'Opponent left';
   $('#over-title').style.color = 'var(--ink)';
-  $('#over-sub').innerHTML = sub || 'Your opponent disconnected — the game can\'t continue.';
+  $('#over-sub').innerHTML = sub || 'Your opponent disconnected, so the game can\'t continue.';
   $('#reveal-row').innerHTML = '';
   $('#btn-rematch').classList.add('hidden');   // nobody to rematch with
   showScreen('over');
@@ -588,8 +589,8 @@ function startLocal() {
   // structured question truthfully from its own secret. The answer shows in chat.
   A.on('question', ({ question }) => autoAnswer(A, question));
   B.on('question', ({ question }) => autoAnswer(B, question));
-  A.on('answer', ({ text }) => { if (activeEngine === A) toast('💬 Answer — ' + text); });
-  B.on('answer', ({ text }) => { if (activeEngine === B) toast('💬 Answer — ' + text); });
+  A.on('answer', ({ text }) => { if (activeEngine === A) toast('💬 Answer: ' + text); });
+  B.on('answer', ({ text }) => { if (activeEngine === B) toast('💬 Answer: ' + text); });
   // No log->toast wiring in local mode: the only engine log is the rematch
   // notice, which would misleadingly toast the very player who clicked Rematch.
   G.A = A; G.B = B;
@@ -656,7 +657,7 @@ function startRobot(difficulty) {
   // Both sides auto-answer structured questions truthfully from their own secret.
   A.on('question', ({ question }) => autoAnswer(A, question));   // you answer the robot
   B.on('question', ({ question }) => autoAnswer(B, question));   // robot answers you
-  A.on('answer', ({ text }) => toast('💬 Answer — ' + text));    // robot's reply to your question
+  A.on('answer', ({ text }) => toast('💬 Answer: ' + text));    // robot's reply to your question
   B.on('answer', ({ yes }) => robotOnAnswer(B, yes));            // your reply to the robot's question
   G.A = A; G.B = B;
   activeEngine = A;
@@ -723,7 +724,7 @@ function enterSetup(engine, onDone) {
   clearFilters();          // a new game (or rematch) starts with no highlight
   setupCtx = { engine, onDone, picked: new Set(), secret: null, step: 1 };
   $('#setup-player').textContent = engine.state.myName;
-  $('#setup-step').textContent = 'Step 1 of 2 — pick 20 characters';
+  $('#setup-step').textContent = 'Step 1 of 2 · pick 20 characters';
   $('#setup-grid').innerHTML = ROSTER.map((c, i) => charCardHTML(c, i)).join('');
   $('#setup-confirm').classList.add('hidden');
   $('#setup-next').classList.remove('hidden');
@@ -788,7 +789,7 @@ function initSetupControls() {
   $('#setup-next').onclick = () => {
     if (setupCtx.picked.size !== BOARD_SIZE) return;
     setupCtx.step = 2;
-    $('#setup-step').textContent = 'Step 2 of 2 — pick your secret';
+    $('#setup-step').textContent = 'Step 2 of 2 · pick your secret';
     $('#setup-next').classList.add('hidden');
     $('#setup-clear').classList.add('hidden');
     $('#setup-random').classList.add('hidden');
@@ -939,7 +940,7 @@ function updateControls(s) {
   if (!myTurn) {
     askBtn.disabled = true; guessBtn.disabled = true; endBtn.disabled = true;
     if (s.pendingGuess) { banner.textContent = 'Your guess is on its way…'; banner.className = 'mode-banner guess'; }
-    else { banner.textContent = '⏳ Not your turn — deducing unlocks when it\'s your turn.'; banner.className = 'mode-banner note'; }
+    else { banner.textContent = '⏳ Not your turn. Deducing unlocks when it\'s your turn.'; banner.className = 'mode-banner note'; }
     return;
   }
 
@@ -948,14 +949,14 @@ function updateControls(s) {
     askBtn.disabled = true;
     guessBtn.disabled = false; guessBtn.textContent = '✖ Cancel guess';
     endBtn.disabled = false;
-    banner.textContent = '🎯 Guess mode — tap your rival\'s secret, or Cancel to keep deducing.';
+    banner.textContent = '🎯 Guess mode. Tap your rival\'s secret, or Cancel to keep deducing.';
     banner.className = 'mode-banner guess';
   } else if (s.asked) {
     // Asked a question this turn → guessing is locked until next turn.
     askBtn.disabled = true; askBtn.textContent = '💬 Question asked';
     guessBtn.disabled = true;
     endBtn.disabled = false;
-    banner.textContent = '💬 You asked a question — no guessing this turn. Cross off who doesn\'t fit, then End Turn.';
+    banner.textContent = '💬 You asked a question, so no guessing this turn. Cross off who doesn\'t fit, then End Turn.';
     banner.className = 'mode-banner ask';
   } else {
     askBtn.disabled = false;
@@ -991,7 +992,7 @@ function logRowHTML(ev, s) {
     case 'answer': body = `✅ answered: ${escapeHTML(ev.text)}`; break;
     case 'card': body = `${ev.action === 'off' ? '🚫 crossed off' : '↩︎ brought back'} ${logCardHTML(ev.cardId)}`; break;
     case 'oppcards': body = `made ${ev.off} card${ev.off === 1 ? '' : 's'} inactive${ev.on ? ` (and ${ev.on} active again)` : ''}`; break;
-    case 'guess': body = `🎯 guessed ${logCardHTML(ev.cardId)} — ${ev.correct ? 'correct! 🏆' : 'wrong'}`; break;
+    case 'guess': body = `🎯 guessed ${logCardHTML(ev.cardId)}: ${ev.correct ? 'correct! 🏆' : 'wrong'}`; break;
     default: return '';
   }
   return `<div class="log-row ${ev.by === 'me' ? 'me' : 'opp'}">
@@ -1018,11 +1019,11 @@ async function handleBoardClick(id) {
 
   // Guess-selection mode (only on my turn): tap a card to guess it.
   if (s.guessing && s.turn === 'me' && !s.pendingGuess) {
-    if (s.deduction[id] === false) { toast('That one is crossed out — pick an open card.'); return; }
+    if (s.deduction[id] === false) { toast('That one is crossed out. Pick an open card.'); return; }
     const ch = CHAR_BY_ID[id];
     const ok = await confirmModal({
       title: `Guess ${ch.name}?`,
-      body: `You think your rival's secret is <b>${ch.name}</b>.<br>Guess right and you <b>win</b> 🏆 — but if you're <b>wrong you lose!</b>`,
+      body: `You think your rival's secret is <b>${ch.name}</b>.<br>Guess right and you <b>win</b> 🏆, but if you're <b>wrong you lose!</b>`,
       okText: `Yes, it's ${ch.name}!`, cancelText: 'Wait, no',
     });
     if (ok) { e.makeGuess(id); afterLocalMaybeOver(); }
@@ -1031,7 +1032,7 @@ async function handleBoardClick(id) {
 
   // Otherwise a click crosses the card off (or back on) — a turn action now.
   if (s.turn !== 'me' || s.pendingGuess) {
-    toast('Hold on — you can only cross cards off on your turn.');
+    toast('Hold on. You can only cross cards off on your turn.');
     return;
   }
   e.toggleCard(id);
@@ -1059,7 +1060,7 @@ function initPlayControls() {
     const e = activeEngine; const s = e.state;
     if (s.turn !== 'me' || s.pendingGuess) return;
     if (s.guessing) { e.cancelGuess(); return; }
-    if (s.asked) { toast('You asked a question this turn — no guessing now.'); return; }
+    if (s.asked) { toast('You asked a question this turn, so no guessing now.'); return; }
     e.beginGuess();
   };
 
@@ -1178,7 +1179,7 @@ function showAnswerUI(engine, question) {
       await noticeModal({
         title: '🚫 Answer honestly!',
         body: `Your character <b>${truth ? 'does' : 'does not'}</b> match <b>${escapeHTML(buildQuestionText(question))}</b>. Please answer truthfully.`,
-        okText: 'Oops — ok',
+        okText: 'Oops, ok',
       });
       return;
     }
@@ -1224,11 +1225,11 @@ function initQuestionUI() {
     $('#qbuilder').classList.add('hidden');
     const ok = await confirmModal({
       title: '🗣️ Ask out loud?',
-      body: 'Say your question to your opponent out loud (or type it in the chat). Heads up — asking uses your turn, so <b>you won\'t be able to guess until next turn</b>.',
+      body: 'Say your question to your opponent out loud (or type it in the chat). Heads up: asking uses your turn, so <b>you won\'t be able to guess until next turn</b>.',
       okText: 'Yes, ask', cancelText: 'Back',
     });
     if (!ok) { $('#qbuilder').classList.remove('hidden'); return; }   // back out — builder reopens
-    if (e.askQuestion()) toast('Question asked out loud — cross off who doesn\'t fit, then End Turn.');
+    if (e.askQuestion()) toast('Question asked out loud. Cross off who doesn\'t fit, then End Turn.');
   };
   $('#qb-send').onclick = () => {
     const e = activeEngine; if (!e) return;
@@ -1236,7 +1237,7 @@ function initQuestionUI() {
     if (!q) return;
     if (e.askStructured(q, buildQuestionText(q))) {
       $('#qbuilder').classList.add('hidden');
-      toast(G.mode === 'online' ? 'Question sent — waiting for a reply.' : 'Question asked!');
+      toast(G.mode === 'online' ? 'Question sent. Waiting for a reply.' : 'Question asked!');
     }
   };
 }
@@ -1259,7 +1260,7 @@ function showOver(s) {
     if (s.lastGuess.by === 'me') {
       sub = s.lastGuess.correct
         ? `You correctly guessed <b>${guessed.name}</b>!`
-        : `You guessed <b>${guessed.name}</b> — but that wasn't it.`;
+        : `You guessed <b>${guessed.name}</b>, but that wasn't it.`;
     } else {
       sub = s.lastGuess.correct
         ? `${s.oppName || 'Your rival'} guessed your secret (<b>${guessed.name}</b>).`
@@ -1292,7 +1293,7 @@ function overEventLine(e, s) {
     case 'chat': body = escapeHTML(e.text); break;
     case 'ask': body = e.outloud ? '🗣️ asked a question out loud' : `🙋 asked: ${escapeHTML(e.text)}`; break;
     case 'answer': body = `✅ answered: ${escapeHTML(e.text)}`; break;
-    case 'guess': body = `🎯 guessed ${logCardHTML(e.cardId)} — ${e.correct ? 'correct 🏆' : 'wrong'}`; break;
+    case 'guess': body = `🎯 guessed ${logCardHTML(e.cardId)}: ${e.correct ? 'correct 🏆' : 'wrong'}`; break;
     default: return '';
   }
   return `<div class="ol-line ${e.by === 'me' ? 'me' : 'opp'}"><span class="oll-meta"><b>${escapeHTML(name)}</b> · ${time}</span><span class="oll-body">${body}</span></div>`;
