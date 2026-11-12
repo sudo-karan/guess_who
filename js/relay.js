@@ -35,6 +35,7 @@ const JOIN_RETRY_MS = 5000;     // spaced out: each retry costs a request from t
 const JOIN_MAX_TRIES = 4;       // ...so cap them rather than hammering for a minute
 const RESUB_MS = 4000;          // backoff before rebuilding a dead subscription
 const RESUB_MAX = 4;
+const BACKFILL_S = 120;         // replay window once a match is running (see armBackfill)
 
 // Anyone self-hosting the game can point it at their own ntfy instance (which has
 // no shared rate limit) by setting window.__GW_RELAY_BASE before the app loads.
@@ -92,7 +93,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
   let resubs = 0;
   const seen = new Set();     // ntfy message ids already handled (SSE may re-deliver)
   const chunks = new Map();   // reassembly buffers for oversized messages
-  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null };
+  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null, healthy: null };
   // Everything the "Connection details" readout needs to explain a stuck room.
   const diag = { sent: 0, failed: 0, throttled: 0, lastStatus: null, sub: 'not started' };
 
@@ -153,20 +154,36 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
 
   /* --------------------------- subscribing ---------------------------- */
 
-  function subscribe(topic) {
+  // `backfill` seconds of history to replay on a REBUILD. A plain subscription
+  // delivers only what is published after it starts, so a move made while we were
+  // reconnecting would simply never arrive and the two players would silently
+  // disagree about whose turn it is. Replayed messages are de-duplicated by id.
+  function subscribe(topic, backfill = 0) {
     inTopic = topic;
     if (!ES) { fail('unsupported', 'Online play needs an internet connection.'); return; }
+    const since = backfill ? `?since=${Math.ceil(backfill)}s` : '';
+    let es;
     try {
-      sub = new ES(`${url}/${topic}/sse`);
+      es = new ES(`${url}/${topic}/sse${since}`);
     } catch (_) {
       diag.sub = 'could not start';
-      fail('relay', 'Could not reach the relay service.');
+      if (!opened) fail('relay', 'Could not reach the relay service.');
+      else retry();
       return;
     }
+    sub = es;
     diag.sub = 'connecting';
-    if ('onopen' in sub) sub.onopen = () => { diag.sub = 'listening'; resubs = 0; };
-    sub.onmessage = (ev) => {
+    // A player who is only receiving has no traffic of their own to prove the
+    // connection is alive, so the transport has to say so itself.
+    if ('onopen' in es) es.onopen = () => {
+      if (es !== sub) return;
+      diag.sub = 'listening'; resubs = 0;
+      cbs.healthy && cbs.healthy();
+    };
+    es.onmessage = (ev) => {
+      if (es !== sub) return;                 // a superseded subscription
       diag.sub = 'listening';
+      resubs = 0;                             // traffic is the real proof we are connected
       let frame;
       try { frame = JSON.parse(ev.data); } catch (_) { return; }
       if (!frame || frame.event !== 'message' || !frame.message) return;
@@ -180,25 +197,48 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
     // A browser gives up on an EventSource for good when the server answers with
     // an HTTP error (a 429 from the shared rate limit, say) — readyState goes to
     // CLOSED and it never retries. Silently deaf is the worst possible state for
-    // a host waiting on a join request, so rebuild it ourselves.
-    sub.onerror = () => {
-      const dead = sub && sub.readyState === 2;
-      diag.sub = dead ? 'dropped' : 'reconnecting';
-      if (!dead || closed) return;
-      if (resubs >= RESUB_MAX) {
+    // a player waiting on their opponent, so rebuild it ourselves.
+    es.onerror = () => {
+      if (es !== sub || closed) return;       // not ours any more: ignore
+      if (es.readyState !== 2) { diag.sub = 'reconnecting'; return; }  // the browser is retrying
+      diag.sub = 'dropped';
+      retry();
+    };
+
+    function retry() {
+      // Mid-game there is no such thing as "give up": the opponent is still there
+      // and the only way back to them is this subscription. Keep trying on a
+      // capped backoff. Before the match, a few attempts then an honest error.
+      if (!opened && resubs >= RESUB_MAX) {
         diag.sub = 'gave up';
         fail('relay', 'Lost the relay connection and could not get it back. Your network may be rate-limited — wait a minute and try again.');
         return;
       }
       resubs++;
-      const delay = RESUB_MS * resubs;
-      status('Reconnecting to the relay…');
+      const delay = Math.min(RESUB_MS * resubs, 20000);
+      status(opened ? 'Reconnecting… (you are still in the game)' : 'Reconnecting to the relay…');
       setTimeout(() => {
-        if (closed) return;
-        try { sub && sub.close(); } catch (_) {}
-        subscribe(inTopic);
+        if (closed || es !== sub) return;
+        try { es.close(); } catch (_) {}
+        // Replay a little more than we were away for, so nothing is missed.
+        subscribe(inTopic, Math.ceil(delay / 1000) + 30);
       }, delay);
-    };
+    }
+  }
+
+  // Once the match is running, re-arm the subscription with a replay window.
+  //
+  // A browser silently reconnects a dropped EventSource by itself, reusing the
+  // SAME url — and a plain subscription delivers only what is published after it
+  // starts. So the common case, the browser healing its own connection, used to
+  // lose every move made during the gap, leaving the two players disagreeing
+  // about whose turn it was. Baking the window into the url means even those
+  // invisible reconnects replay it. Duplicates are dropped by message id.
+  function armBackfill() {
+    if (closed || !inTopic) return;
+    const old = sub;
+    subscribe(inTopic, BACKFILL_S);
+    try { old && old.close(); } catch (_) {}
   }
 
   function reassemble(part) {
@@ -254,6 +294,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
           publish({ __t: H.ACCEPT, to: from });
           status('Connected!');
           cbs.open && cbs.open();
+          armBackfill();
         };
         const deny = () => {
           publish({ __t: H.DENY, to: from });
@@ -274,6 +315,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
       peerSid = msg.__s || null;
       opened = true; status('Connected!');
       cbs.open && cbs.open();
+      armBackfill();
       return;
     }
     if (t === H.DENY) {
@@ -306,6 +348,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
     onError(fn) { cbs.error = fn; },
     onStatus(fn) { cbs.status = fn; },
     onJoinRequest(fn) { cbs.joinRequest = fn; },
+    onHealthy(fn) { cbs.healthy = fn; },
 
     diagnostics() {
       return {
@@ -358,7 +401,14 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
       joinTimer = setInterval(() => { if (verdict) stopTimers(); else ask(); }, JOIN_RETRY_MS);
     },
 
-    send(msg) { if (opened) publish(msg); },
+    // A move that never left is worse than a slow one: without this the sender
+    // believed it had taken its turn while the opponent waited forever.
+    send(msg) {
+      if (!opened) return;
+      Promise.resolve(publish(msg)).then((ok) => {
+        if (ok === false) fail('unsent', 'A move couldn\'t be sent — the relay is busy. It will be retried.');
+      });
+    },
 
     isOpen() { return opened; },
 

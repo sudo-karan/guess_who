@@ -109,6 +109,17 @@ body {
 .net-status.error { color: var(--red); }
 .net-status.ok { color: var(--green); }
 
+/* A connection hiccup that has NOT ended the game. */
+.net-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 90;
+  padding: 10px 16px; text-align: center;
+  background: #fff4d6; color: #7a5b00; border-bottom: 2px solid #f0cf7a;
+  font-weight: 700; font-size: .92rem; line-height: 1.4;
+  animation: banner-in .2s ease-out;
+}
+.net-banner.hidden { display: none; }
+@keyframes banner-in { from { transform: translateY(-100%); } to { transform: translateY(0); } }
+
 /* Connection diagnostics — hidden until something actually goes wrong. */
 .net-details { margin: 10px auto 0; max-width: 520px; font-size: .86rem; }
 .net-details > summary {

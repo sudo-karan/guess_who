@@ -355,6 +355,7 @@ function endHostedRoom() {
 // Tear down any current online game channel + hosted-room advertisement, so we
 // never leave a second (stale, "unavailable") room behind or a dangling peer.
 function teardownOnline() {
+  netRecovered();        // a pending countdown must not outlive the game that lit it
   endHostedRoom();
   if (G.channel) { try { G.channel.close(); } catch (_) {} G.channel = null; }
 }
@@ -379,6 +380,9 @@ function makeOnlineEngine(isHost) {
 
 // Intercept the app-level `roster` message; everything else is an engine message.
 function onOnlineMessage(m, engine) {
+  // Traffic arriving is proof the opponent is still connected: clear any
+  // interruption warning and cancel the countdown to "Opponent left".
+  netRecovered();
   if (m && m.type === 'roster') {
     setRoster(m.roster);
     // The guest opens the board builder once it has received the roster (the
@@ -403,6 +407,7 @@ function hostOnline() {
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
   G.channel.onJoinRequest((who, ctl) => showJoinApproval(who, ctl));
+  G.channel.onHealthy(netRecovered);
   G.channel.onOpen(() => {
     setNetStatus('Opponent connected!', 'ok');
     noteTransport();
@@ -441,6 +446,7 @@ function joinOnline(codeArg) {
   const engine = makeOnlineEngine(false);
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
+  G.channel.onHealthy(netRecovered);
   G.channel.onOpen(() => {
     clearTimeout(joinWaitHint);
     setNetStatus('Connected! Dealing the characters…', 'ok');
@@ -493,20 +499,71 @@ function handleNetError(e) {
 
   // Past the lobby: a dropped connection would otherwise leave this client stuck
   // forever (e.g. on "Awaiting result…"). Drive it to a terminal screen with a
-  // way home instead.
+  // way home instead — but ONLY when the game really is over.
   if (G.mode === 'online' && activeEngine && activeEngine.state.phase !== 'over') {
-    showDisconnected();
-  } else {
-    toast('⚠️ ' + msg);
+    if (TERMINAL_NET_ERRORS.includes(e && e.type)) showDisconnected();
+    else softNetTrouble(msg);
+    return;
+  }
+  toast('⚠️ ' + msg);
+}
+
+/* --------------------- recoverable vs terminal trouble -------------------- */
+// Only these mean the game is genuinely over. Everything else — a dropped
+// signalling socket, a relay subscription being rebuilt, a rate limit — is an
+// interruption the connection recovers from on its own, and must NOT tear down a
+// live match. Getting this wrong told the player whose turn it wasn't, sitting
+// idle and receiving nothing, that their opponent had left.
+const TERMINAL_NET_ERRORS = ['closed', 'denied', 'full', 'nosuchroom', 'unsupported', 'code'];
+const NET_GRACE_MS = 45000;   // how long a silent interruption may last before we call it
+
+let netGraceTimer = null;
+
+// Warn without destroying anything, and escalate only if it really doesn't come back.
+function softNetTrouble(msg) {
+  const el = $('#net-banner');
+  if (el) {
+    el.textContent = '⚠️ ' + msg + ' Trying to reconnect — your game is still here.';
+    el.classList.remove('hidden');
+  }
+  if (netGraceTimer) return;              // already counting down
+  const forGame = activeEngine;
+  netGraceTimer = setTimeout(() => {
+    netGraceTimer = null;
+    // Still OUR connection we are judging, not the opponent's presence — we have
+    // no way to know that. Say only what is true, and don't fire into a game that
+    // has since ended or been replaced.
+    if (G.mode === 'online' && activeEngine === forGame && activeEngine
+        && activeEngine.state.phase !== 'over') {
+      showDisconnected('🔌', 'Connection lost',
+        'We lost the connection and couldn\'t get it back. Your opponent may still be waiting — '
+        + 'check your internet and start a new room.');
+    }
+  }, NET_GRACE_MS);
+}
+
+// Clear the warning. Called both when game traffic arrives AND when the transport
+// reports it has reconnected — the player whose turn it isn't receives nothing for
+// minutes at a time, so traffic alone is not a usable test of whether we are still
+// connected. Judging them by silence is exactly what produced the false
+// "Opponent left" in the first place.
+function netRecovered() {
+  clearTimeout(netGraceTimer);
+  netGraceTimer = null;
+  const el = $('#net-banner');
+  if (el && !el.classList.contains('hidden')) {
+    el.classList.add('hidden');
+    setNetStatus('');
   }
 }
 
-function showDisconnected() {
+function showDisconnected(emoji, title, sub) {
+  netRecovered();                        // stop any pending escalation
   endHostedRoom();                       // room can't continue — drop it from the lobby
-  $('#over-emoji').textContent = '🔌';
-  $('#over-title').textContent = 'Opponent left';
+  $('#over-emoji').textContent = emoji || '🔌';
+  $('#over-title').textContent = title || 'Opponent left';
   $('#over-title').style.color = 'var(--ink)';
-  $('#over-sub').innerHTML = 'Your opponent disconnected — the game can\'t continue.';
+  $('#over-sub').innerHTML = sub || 'Your opponent disconnected — the game can\'t continue.';
   $('#reveal-row').innerHTML = '';
   $('#btn-rematch').classList.add('hidden');   // nobody to rematch with
   showScreen('over');

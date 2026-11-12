@@ -38,14 +38,27 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
   let opened = false;
   let done = false;           // terminal error already reported
   let mode = 'direct';        // 'direct' | 'relay'
-  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null };
+  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null, healthy: null };
 
   const status = (t) => { if (!done) cbs.status && cbs.status(t); };
+
+  // Recoverable trouble must NOT latch the channel shut. It used to: the first
+  // error of any kind set `done`, so after one harmless blip a genuine departure
+  // was never reported at all and the player sat in a game nobody was in.
+  const RECOVERABLE = ['peer', 'broker', 'relay', 'ratelimited', 'conn', 'timeout', 'unsent'];
+  let lastSoft = '';
   const fail = (type, message) => {
     if (done) return;
+    if (RECOVERABLE.includes(type)) {
+      if (lastSoft === type) return;            // don't repeat the same complaint
+      lastSoft = type;
+      cbs.error && cbs.error({ type, message });
+      return;
+    }
     done = true;
     cbs.error && cbs.error({ type, message });
   };
+  const recovered = () => { lastSoft = ''; cbs.healthy && cbs.healthy(); };
 
   const shut = (c) => { if (c) { try { c.close(); } catch (_) {} } };
 
@@ -57,6 +70,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
   // already torn down the transport the guest is really on, leaving the host
   // listening on nothing with no error shown.
   function wire(ch, label, claim) {
+    if (ch.onHealthy) ch.onHealthy(() => { if (!active || active === ch) recovered(); });
     ch.onData((m) => { if (active === ch) cbs.data && cbs.data(m); });
     ch.onStatus((t) => { if (!active || active === ch) status(label ? `${label} ${t}` : t); });
     ch.onJoinRequest((who, ctl) => {
@@ -178,6 +192,8 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
     onError(fn) { cbs.error = fn; },
     onStatus(fn) { cbs.status = fn; },
     onJoinRequest(fn) { cbs.joinRequest = fn; },
+    // Called when reported trouble has cleared and the transport is working again.
+    onHealthy(fn) { cbs.healthy = fn; },
 
     host(onCode) {
       if (!canDirect() && !canRelay()) {
