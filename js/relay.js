@@ -153,20 +153,30 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
 
   /* --------------------------- subscribing ---------------------------- */
 
-  function subscribe(topic) {
+  // `backfill` seconds of history to replay on a REBUILD. A plain subscription
+  // delivers only what is published after it starts, so a move made while we were
+  // reconnecting would simply never arrive and the two players would silently
+  // disagree about whose turn it is. Replayed messages are de-duplicated by id.
+  function subscribe(topic, backfill = 0) {
     inTopic = topic;
     if (!ES) { fail('unsupported', 'Online play needs an internet connection.'); return; }
+    const since = backfill ? `?since=${Math.ceil(backfill)}s` : '';
+    let es;
     try {
-      sub = new ES(`${url}/${topic}/sse`);
+      es = new ES(`${url}/${topic}/sse${since}`);
     } catch (_) {
       diag.sub = 'could not start';
-      fail('relay', 'Could not reach the relay service.');
+      if (!opened) fail('relay', 'Could not reach the relay service.');
+      else retry();
       return;
     }
+    sub = es;
     diag.sub = 'connecting';
-    if ('onopen' in sub) sub.onopen = () => { diag.sub = 'listening'; resubs = 0; };
-    sub.onmessage = (ev) => {
+    if ('onopen' in es) es.onopen = () => { if (es === sub) { diag.sub = 'listening'; resubs = 0; } };
+    es.onmessage = (ev) => {
+      if (es !== sub) return;                 // a superseded subscription
       diag.sub = 'listening';
+      resubs = 0;                             // traffic is the real proof we are connected
       let frame;
       try { frame = JSON.parse(ev.data); } catch (_) { return; }
       if (!frame || frame.event !== 'message' || !frame.message) return;
@@ -180,25 +190,33 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
     // A browser gives up on an EventSource for good when the server answers with
     // an HTTP error (a 429 from the shared rate limit, say) — readyState goes to
     // CLOSED and it never retries. Silently deaf is the worst possible state for
-    // a host waiting on a join request, so rebuild it ourselves.
-    sub.onerror = () => {
-      const dead = sub && sub.readyState === 2;
-      diag.sub = dead ? 'dropped' : 'reconnecting';
-      if (!dead || closed) return;
-      if (resubs >= RESUB_MAX) {
+    // a player waiting on their opponent, so rebuild it ourselves.
+    es.onerror = () => {
+      if (es !== sub || closed) return;       // not ours any more: ignore
+      if (es.readyState !== 2) { diag.sub = 'reconnecting'; return; }  // the browser is retrying
+      diag.sub = 'dropped';
+      retry();
+    };
+
+    function retry() {
+      // Mid-game there is no such thing as "give up": the opponent is still there
+      // and the only way back to them is this subscription. Keep trying on a
+      // capped backoff. Before the match, a few attempts then an honest error.
+      if (!opened && resubs >= RESUB_MAX) {
         diag.sub = 'gave up';
         fail('relay', 'Lost the relay connection and could not get it back. Your network may be rate-limited — wait a minute and try again.');
         return;
       }
       resubs++;
-      const delay = RESUB_MS * resubs;
-      status('Reconnecting to the relay…');
+      const delay = Math.min(RESUB_MS * resubs, 20000);
+      status(opened ? 'Reconnecting… (you are still in the game)' : 'Reconnecting to the relay…');
       setTimeout(() => {
-        if (closed) return;
-        try { sub && sub.close(); } catch (_) {}
-        subscribe(inTopic);
+        if (closed || es !== sub) return;
+        try { es.close(); } catch (_) {}
+        // Replay a little more than we were away for, so nothing is missed.
+        subscribe(inTopic, Math.ceil(delay / 1000) + 30);
       }, delay);
-    };
+    }
   }
 
   function reassemble(part) {

@@ -327,14 +327,41 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
     });
   }
 
-  // PeerJS drops its signalling socket on network blips, laptop sleep and
-  // background-tab throttling. Without reconnecting, a host's room silently stops
-  // accepting guests while the page still says "Room ready".
+  // Losing the matchmaking server is NOT losing the game.
+  //
+  // The data channel is peer-to-peer: once two players are connected, the broker
+  // is needed only to set up NEW connections. But PeerJS drops its signalling
+  // socket routinely — on network blips, laptop sleep, and background-tab
+  // throttling — and reports it as an error on the peer. Treating that as a
+  // disconnect told a player whose turn it wasn't, and who was therefore sitting
+  // idle receiving nothing, that their opponent had left, over a connection that
+  // was working perfectly. The game "healed" the moment the next move arrived,
+  // but by then they had often already quit.
+  //
+  // So once the match is open these are reported quietly and nothing else: only
+  // the data connection itself closing ends a game.
+  const SIGNALLING_ONLY = [
+    'network', 'socket-error', 'socket-closed', 'server-error', 'disconnected',
+  ];
+  function signallingOnly(type) {
+    if (!opened) return false;                 // before the match, these are real failures
+    if (!SIGNALLING_ONLY.includes(type)) return false;
+    brokerHiccup();
+    return true;
+  }
+
+  function brokerHiccup() {
+    diag.broker = 'reconnecting';
+    status('Reconnecting to the server… (your game is unaffected)');
+    try { peer && peer.reconnect(); } catch (_) {}
+  }
+
   function keepAlive(p) {
     p.on('disconnected', () => {
       if (done) return;
       diag.broker = 'reconnecting';
-      status('Reconnecting…');
+      if (!opened) status('Reconnecting…');
+      else status('Reconnecting to the server… (your game is unaffected)');
       try { p.reconnect(); } catch (_) {}
     });
   }
@@ -401,6 +428,7 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         if (msg === 'peer-unavailable') return;     // a guest vanished; not fatal to the room
         if (peer !== p) return;                     // a ghost of a discarded attempt
         clearTimeout(brokerTimer);
+        if (signallingOnly(msg)) return;            // see note on brokerHiccup()
         fail('peer', friendly(msg));
       });
     },
@@ -432,6 +460,7 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         // No such room is a REAL answer — report it straight away so no later
         // timeout can replace it with a vaguer message.
         if (t === 'peer-unavailable') { fail('nosuchroom', 'No room found with that code. Check it and try again.'); return; }
+        if (signallingOnly(t)) return;              // see note on brokerHiccup()
         fail('peer', friendly(t));
       });
     },

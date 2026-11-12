@@ -379,6 +379,9 @@ function makeOnlineEngine(isHost) {
 
 // Intercept the app-level `roster` message; everything else is an engine message.
 function onOnlineMessage(m, engine) {
+  // Traffic arriving is proof the opponent is still connected: clear any
+  // interruption warning and cancel the countdown to "Opponent left".
+  netRecovered();
   if (m && m.type === 'roster') {
     setRoster(m.roster);
     // The guest opens the board builder once it has received the roster (the
@@ -493,15 +496,53 @@ function handleNetError(e) {
 
   // Past the lobby: a dropped connection would otherwise leave this client stuck
   // forever (e.g. on "Awaiting result…"). Drive it to a terminal screen with a
-  // way home instead.
+  // way home instead — but ONLY when the game really is over.
   if (G.mode === 'online' && activeEngine && activeEngine.state.phase !== 'over') {
-    showDisconnected();
-  } else {
-    toast('⚠️ ' + msg);
+    if (TERMINAL_NET_ERRORS.includes(e && e.type)) showDisconnected();
+    else softNetTrouble(msg);
+    return;
+  }
+  toast('⚠️ ' + msg);
+}
+
+/* --------------------- recoverable vs terminal trouble -------------------- */
+// Only these mean the game is genuinely over. Everything else — a dropped
+// signalling socket, a relay subscription being rebuilt, a rate limit — is an
+// interruption the connection recovers from on its own, and must NOT tear down a
+// live match. Getting this wrong told the player whose turn it wasn't, sitting
+// idle and receiving nothing, that their opponent had left.
+const TERMINAL_NET_ERRORS = ['closed', 'denied', 'full', 'nosuchroom', 'unsupported', 'code'];
+const NET_GRACE_MS = 45000;   // how long a silent interruption may last before we call it
+
+let netGraceTimer = null;
+
+// Warn without destroying anything, and escalate only if it really doesn't come back.
+function softNetTrouble(msg) {
+  const el = $('#net-banner');
+  if (el) {
+    el.textContent = '⚠️ ' + msg + ' Trying to reconnect — your game is still here.';
+    el.classList.remove('hidden');
+  }
+  if (netGraceTimer) return;              // already counting down
+  netGraceTimer = setTimeout(() => {
+    netGraceTimer = null;
+    if (G.mode === 'online' && activeEngine && activeEngine.state.phase !== 'over') showDisconnected();
+  }, NET_GRACE_MS);
+}
+
+// Any traffic at all proves the opponent is still there.
+function netRecovered() {
+  clearTimeout(netGraceTimer);
+  netGraceTimer = null;
+  const el = $('#net-banner');
+  if (el && !el.classList.contains('hidden')) {
+    el.classList.add('hidden');
+    setNetStatus('');
   }
 }
 
 function showDisconnected() {
+  netRecovered();                        // stop any pending escalation
   endHostedRoom();                       // room can't continue — drop it from the lobby
   $('#over-emoji').textContent = '🔌';
   $('#over-title').textContent = 'Opponent left';
