@@ -91,18 +91,33 @@ styles.css             # colourful, responsive styling
 js/
   characters.js        # 30-character roster + procedural SVG avatars
   engine.js            # pure, testable game state machine
-  net.js               # WebRTC (PeerJS) online channel + local pass-and-play
+  ai.js                # the robot opponent's decision making
+  loganalysis.js       # deduction summaries for the end-of-game log
+  net.js               # direct WebRTC (PeerJS) transport + local pass-and-play
+  relay.js             # HTTPS fallback transport, for networks WebRTC can't cross
+  channel.js           # picks between them: direct first, relay if that fails
+  lobby.js             # room discovery (a broadcast feed, no server of our own)
   app.js               # UI rendering + orchestration
   vendor/peerjs.min.js # vendored PeerJS (no runtime CDN dependency)
 tests/
-  engine.test.mjs      # engine unit tests (node --test)
+  *.test.mjs           # unit tests (node --test)
+  fake-peer.mjs        # in-memory stand-in for the PeerJS broker
+  fake-ntfy.mjs        # in-memory stand-in for the relay service
 ```
 
 ## Tests
 
 ```bash
-node --test tests/engine.test.mjs
+node --test "tests/**/*.test.mjs"
 ```
+
+Quote the glob so Node expands it, and so it matches only `*.test.mjs` — the
+fakes beside them are helper modules, not test files.
+
+No dependencies and no build step, so there is nothing to install first. The
+same command runs on every pull request and on anything landing on `main`
+(`.github/workflows/tests.yml`); `main` deploys straight to GitHub Pages, so
+that run is the only gate between a change and the live site.
 
 ## Notes on online play
 

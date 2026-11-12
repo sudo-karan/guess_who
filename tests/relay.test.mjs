@@ -158,7 +158,9 @@ test('relay: a guest that reloads and tries again DOES get the host prompted aga
   // nothing, so after one unanswered request the host never saw another popup —
   // not even from the same player reloading, who arrives with a new session id.
   const ntfy = createFakeNtfy();
-  const opts = { fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl };
+  // A short retry interval keeps this honest without a real 11-second wait: the
+  // liveness rule is "2 x the retry interval", whatever that interval is.
+  const opts = { fetchImpl: ntfy.fetchImpl, EventSourceImpl: ntfy.EventSourceImpl, joinRetryMs: 120 };
   const host = createRelayChannel(opts);
   const prompts = [];
   host.onJoinRequest((who) => prompts.push(who));   // captured, never answered
@@ -170,9 +172,9 @@ test('relay: a guest that reloads and tries again DOES get the host prompted aga
   g1.close();                                        // the player gives up and reloads
 
   // The abandoned requester stops re-publishing, so it ages out and the newcomer
-  // can take over. (Liveness is 2 x the join retry interval.)
+  // can take over.
   const g2 = createRelayChannel(opts);
-  await flush(11000);
+  await flush(300);
   g2.join('AB3U', 'Bo');
   await until(() => prompts.length === 2, 20000);
   assert.equal(prompts.length, 2, 'the host is asked again');
