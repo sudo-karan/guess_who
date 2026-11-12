@@ -71,7 +71,7 @@ export function relayAvailable() {
 }
 
 // `fetchImpl` / `EventSourceImpl` are injectable so this is testable without a network.
-export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
+export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetryMs = JOIN_RETRY_MS } = {}) {
   const url = (base || relayBase()).replace(/\/+$/, '');
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
   const ES = EventSourceImpl || (typeof EventSource === 'function' ? EventSource : null);
@@ -277,7 +277,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
         const at = Date.now();
         if (prompted) {
           if (from === promptedSid) { lastJoinAt = at; return; }   // same guest, still waiting
-          if (at - lastJoinAt < JOIN_RETRY_MS * 2) return;         // the pending one is alive: wait
+          if (at - lastJoinAt < joinRetryMs * 2) return;           // the pending one is alive: wait
           // Otherwise the pending requester has gone quiet — let this one take over.
           // Deliberately no DENY/FULL to the newcomer: both are terminal and would
           // tell them the host refused when the host never saw them.
@@ -398,7 +398,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl } = {}) {
       // The host may not be subscribed at the instant we ask, and a relayed message
       // is fire-and-forget — so ask again a few times, spaced out to stay inside
       // the service's request budget.
-      joinTimer = setInterval(() => { if (verdict) stopTimers(); else ask(); }, JOIN_RETRY_MS);
+      joinTimer = setInterval(() => { if (verdict) stopTimers(); else ask(); }, joinRetryMs);
     },
 
     // A move that never left is worse than a slow one: without this the sender

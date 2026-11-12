@@ -1,0 +1,36 @@
+name: Tests
+
+# Runs the unit tests on every pull request, and on anything that lands on the
+# default branch. main deploys straight to GitHub Pages, so this is the only
+# gate between a change and the live site.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push supersedes an in-flight run for the same branch.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: node --test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # No install step: the game has no dependencies and no build. The glob is
+      # quoted so Node expands it rather than the shell, and so it picks up only
+      # *.test.mjs — the fake broker/relay helpers next to them are modules, not
+      # test files, and would fail if Node tried to run them as tests.
+      - name: Run tests
+        run: node --test "tests/**/*.test.mjs"
