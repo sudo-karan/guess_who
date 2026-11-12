@@ -124,6 +124,7 @@ export function createLobby({
   let sweeper = null, beacon = null;
   let mine = null;            // the room this browser is hosting, if any
   let lastWho = 0;            // when we last answered a "who's there?"
+  const meId = Math.random().toString(36).slice(2, 10);   // to recognise our own broadcasts
   let started = false, closed = false;
 
   const emit = () => onRooms && onRooms(registry.list());
@@ -165,6 +166,10 @@ export function createLobby({
     // if we are, rate-limited so a busy lobby can't make hosts shout over
     // each other. Only live traffic: a cached "who" from history is long answered.
     if (msg && msg.t === 'who') {
+      // Never answer our own broadcast: we are subscribed to the same topic we
+      // publish on, so without this every host replies to itself, spending a
+      // request from a budget this redesign exists to protect.
+      if (msg.from === meId) return;
       if (live && mine && now() - lastWho > WHO_COOLDOWN_MS) { lastWho = now(); announce(); }
       return;
     }
@@ -204,7 +209,7 @@ export function createLobby({
 
   // "Who's there?" — hosts answer once, so a page that just opened learns about
   // rooms whose announcement has already scrolled out of the cached history.
-  const askWho = () => post(JSON.stringify({ t: 'who' }));
+  const askWho = () => post(JSON.stringify({ t: 'who', from: meId }));
 
   return {
     start() {

@@ -273,6 +273,73 @@ test('online: losing the matchmaking server mid-game does NOT end the game', asy
   host.close(); guest.close();
 });
 
+test('online: a broker reconnect mid-game does not open a SECOND connection', async () => {
+  // reconnect() re-fires 'open'. Dialling again opened a second data connection
+  // that the guest then treated as the live one — muting the real channel and
+  // making the host reject it as full. Worse than the bug it was added to fix.
+  const broker = createFakeBroker();
+  const { host, guest, st } = pair(broker);
+  host.onJoinRequest((name, ctl) => ctl.accept());
+  host.host((c) => { st.code = c; });
+  await until(() => st.code !== null);
+  guest.join(st.code, 'Bo');
+  await until(() => st.hostOpen && st.guestOpen);
+
+  const before = st.hostData.length;
+  // The broker drops and comes back, as it does on any network blip.
+  [...broker.claimed.values()].forEach((p) => { p.emit('disconnected'); p.emit('open', p.id); });
+  await flush(60);
+
+  assert.deepEqual(st.guestErrors, [], 'no error from a reconnect');
+  assert.deepEqual(st.hostErrors, [], 'and the host is not told the room is full');
+  // The original channel must still be the live one, in both directions.
+  guest.send({ type: 'move', n: 1 });
+  host.send({ type: 'move', n: 2 });
+  await until(() => st.hostData.length > before && st.guestData.some((m) => m.type === 'move'));
+  assert.ok(st.hostData.some((m) => m.type === 'move' && m.n === 1), 'guest -> host still works');
+  assert.ok(st.guestData.some((m) => m.type === 'move' && m.n === 2), 'host -> guest still works');
+  host.close(); guest.close();
+});
+
+test('online: a reconnect reports the transport healthy again', async () => {
+  // The player whose turn it is NOT receives nothing for minutes, so recovery has
+  // to be reported by the transport; judging them by silence is the original bug.
+  const broker = createFakeBroker();
+  const { host, guest, st } = pair(broker);
+  host.onJoinRequest((name, ctl) => ctl.accept());
+  let healthy = 0;
+  guest.onHealthy(() => { healthy++; });
+  host.host((c) => { st.code = c; });
+  await until(() => st.code !== null);
+  guest.join(st.code, 'Bo');
+  await until(() => st.hostOpen && st.guestOpen);
+
+  [...broker.claimed.values()].forEach((p) => { p.emit('disconnected'); p.emit('open', p.id); });
+  await until(() => healthy > 0);
+  assert.ok(healthy > 0, 'recovery is announced without needing any game traffic');
+  host.close(); guest.close();
+});
+
+test('online: "unavailable-id" mid-game must not destroy the live connection', async () => {
+  // After a reconnect the server can still hold our old registration. Destroying
+  // the peer over that would close the live data channel with it.
+  const broker = createFakeBroker();
+  const { host, guest, st } = pair(broker);
+  host.onJoinRequest((name, ctl) => ctl.accept());
+  host.host((c) => { st.code = c; });
+  await until(() => st.code !== null);
+  guest.join(st.code, 'Bo');
+  await until(() => st.hostOpen && st.guestOpen);
+
+  [...broker.claimed.values()].forEach((p) => p.emit('error', { type: 'unavailable-id' }));
+  await flush(40);
+  assert.deepEqual(st.hostErrors, [], 'not reported as a failure');
+  host.send({ type: 'still-here' });
+  await until(() => st.guestData.some((m) => m.type === 'still-here'));
+  assert.ok(st.guestData.some((m) => m.type === 'still-here'), 'the game connection survives');
+  host.close(); guest.close();
+});
+
 test('online: the same signalling errors ARE fatal before the match opens', async () => {
   // Before anyone is connected, the broker is the only way in — so a dead socket
   // there is a real failure and must still be reported.
