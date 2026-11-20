@@ -23,6 +23,8 @@ import { createOnlineChannel, randomCode, peerAvailable } from './net.js';
 import { createRelayChannel, relayAvailable } from './relay.js';
 
 const HOST_RETRIES = 3;       // room-code collisions on the shared broker
+const FIXED_WAIT_MS = 2000;   // between tries at one specific code
+const FIXED_TRIES = 40;       // ~80s, which outlasts the broker's own liveness timeout
 
 export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay } = {}) {
   const mkDirect = makeDirect || (() => createOnlineChannel({ makePeer }));
@@ -44,13 +46,21 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
   };
   let sessionToken = null;
   let resumeToken = null;
+  // Per ROOM, not per attempt: a host may try several times to register a code,
+  // and the relay subscription and the code announcement must happen once.
+  let relayStarted = false, announced = false;
+  let amHost = false, roomCode = null;
 
   const status = (t) => { if (!done) cbs.status && cbs.status(t); };
 
   // Recoverable trouble must NOT latch the channel shut. It used to: the first
   // error of any kind set `done`, so after one harmless blip a genuine departure
   // was never reported at all and the player sat in a game nobody was in.
-  const RECOVERABLE = ['peer', 'broker', 'relay', 'ratelimited', 'conn', 'timeout', 'unsent'];
+  // 'closed' belongs here too: the opponent refreshing their page is exactly what
+  // it looks like from this side, and the room stays open for them to come back
+  // to. Latching the channel shut on it left the host unable to report anything
+  // afterwards, including a genuine failure.
+  const RECOVERABLE = ['peer', 'broker', 'relay', 'ratelimited', 'conn', 'timeout', 'unsent', 'closed'];
   let lastSoft = '';
   const fail = (type, message) => {
     if (done) return;
@@ -76,9 +86,20 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
   // listening on nothing with no error shown.
   function wire(ch, label, claim) {
     if (ch.onHealthy) ch.onHealthy(() => { if (!active || active === ch) recovered(); });
-    if (ch.onToken) ch.onToken((t) => { sessionToken = t; cbs.token && cbs.token(t); });
+    if (ch.onToken) ch.onToken((t) => {
+      sessionToken = t;
+      // Both transports need it. The one that carries a resume is not always the
+      // one that issued the token: a phone that reconnects on a network with no
+      // peer-to-peer path comes back on the relay holding a token minted direct.
+      if (direct && direct !== ch && direct.useSessionToken) direct.useSessionToken(t);
+      if (relay && relay !== ch && relay.useSessionToken) relay.useSessionToken(t);
+      cbs.token && cbs.token(t);
+    });
     if (ch.onResumed) ch.onResumed(() => {
-      if (opened && active !== ch) { shut(ch); return; }
+      // The opponent may come back on the transport we are not currently on,
+      // which makes that the one the game is on now. Re-point to it. Shutting it
+      // instead, which is what this used to do, left the returning player
+      // believing they had resumed onto a line we closed in the same breath.
       claim();
       opened = true;
       recovered();
@@ -112,8 +133,24 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
 
   /* -------------------------------- host -------------------------------- */
 
+  // The opponent may come back on a network that cannot carry peer-to-peer at
+  // all, a phone that reconnects on mobile data say, and then the relay is
+  // their only way back to us. We drop ours the moment a direct connection wins,
+  // which is right during normal play (a subscription we are not using still
+  // costs from the relay's shared budget), but it leaves no way home once the
+  // direct connection goes. So put it back then, and only then. The reverse case
+  // needs nothing: a guest who regains a direct path tries it first anyway and
+  // falls back to the relay on its own.
+  function listenAgainForReturn() {
+    if (!amHost || !roomCode || done || relay || !canRelay()) return;
+    relayStarted = false;
+    status('Listening for your opponent to come back…');
+    openRelayHost(roomCode, null);
+  }
+
   function startHost(onCode, attempt, fixedCode) {
     const code = fixedCode || randomCode();
+    amHost = true; roomCode = code;
     direct = mkDirect();
     let settled = false;
 
@@ -130,12 +167,24 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
       }
       // Re-opening a specific room: the broker may still hold our old
       // registration for a few seconds after a refresh, so wait rather than
-      // move to a code our opponent has never seen.
+      // move to a code our opponent has never seen. An ntfy topic has no
+      // exclusive owner, though, so a stale broker registration means nothing to
+      // the relay: bring the room up there straight away and keep trying the
+      // direct route behind it. Without this the host sat on "Creating room…"
+      // for as long as the tab stayed open, listening on nothing, with no error.
       if (e.type === 'taken' && fixedCode && !settled) {
         shut(direct); direct = null;
-        setTimeout(() => { if (!settled) startHost(onCode, attempt + 1, fixedCode); }, 2000);
+        openRelayHost(fixedCode, onCode);
+        if (attempt + 1 >= FIXED_TRIES) { directDead = true; return; }
+        const t = setTimeout(() => {
+          if (!settled && !opened && !done) startHost(onCode, attempt + 1, fixedCode);
+        }, FIXED_WAIT_MS);
+        if (t && typeof t.unref === 'function') t.unref();
         return;
       }
+      // The game was live on this connection and it has gone: make sure there is
+      // a route back before reporting it.
+      if (e.type === 'closed' && opened && active === direct) listenAgainForReturn();
       if (active === direct || opened) { fail(e.type, e.message); return; }
       // The broker is unreachable but the relay can still carry the whole game.
       directDead = true;
@@ -150,7 +199,9 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
   }
 
   function openRelayHost(code, onCode) {
-    if (canRelay()) {
+    roomCode = code;
+    if (canRelay() && !relayStarted) {
+      relayStarted = true;
       relay = mkRelay();
       if (sessionToken && relay.useSessionToken) relay.useSessionToken(sessionToken);
       wire(relay, 'Relay:', () => { active = relay; mode = 'relay'; shut(direct); direct = null; });
@@ -159,6 +210,9 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
       // it carried on advertising itself as open.
       relay.onError((e) => {
         if (opened && active === relay) { fail(e.type, e.message); return; }  // a live game died
+        // Listening for an opponent to come back, and that listening has failed.
+        // They now have no route home, so say so rather than waiting in silence.
+        if (opened && !(active && active.isOpen && active.isOpen())) { fail(e.type, e.message); return; }
         if (opened) return;                        // playing over direct; relay is moot
         if (!directDead) {                         // the direct route may still work
           status('Relay unavailable, but a direct connection can still get through.');
@@ -168,12 +222,14 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
       });
       relay.host(code);
     }
+    if (announced) return;
+    announced = true;
     onCode && onCode(code);
   }
 
   /* -------------------------------- join -------------------------------- */
 
-  function startJoin(code, name, resume) {
+  function startJoin(code, name, resume, epoch) {
     direct = mkDirect();
     let switched = false;
 
@@ -193,7 +249,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
         if (e.type === 'timeout') { fail('timeout', 'No room found with that code, or the host has left. Check the code and try again.'); return; }
         fail(e.type, e.message);
       });
-      relay.join(code, name, resume);
+      relay.join(code, name, resume, epoch);
     };
 
     wire(direct, '', () => { active = direct; });
@@ -204,7 +260,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
       if (e.type === 'nosuchroom' || e.type === 'broker' || e.type === 'peer') { toRelay(e.message); return; }
       fail(e.type, e.message);
     });
-    direct.join(code, name, resume);
+    direct.join(code, name, resume, epoch);
   }
 
   /* --------------------------------- api -------------------------------- */
@@ -228,7 +284,9 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
       startHost(onCode, 0, code);
     },
 
-    join(code, name, resume) {
+    // `epoch` counts this player's return attempts, so the host can tell a
+    // repeated request apart from a genuinely new one.
+    join(code, name, resume, epoch) {
       const clean = String(code || '').trim().toUpperCase();
       if (!clean) { fail('code', 'Enter a room code.'); return; }
       if (!canDirect() && !canRelay()) {
@@ -236,7 +294,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
         return;
       }
       if (resume) resumeToken = resume;
-      startJoin(clean, name, resume);
+      startJoin(clean, name, resume, epoch);
     },
 
     onResumed(fn) { cbs.resumed = fn; },
@@ -252,7 +310,14 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
     },
 
     send(msg) { if (active) active.send(msg); },
-    isOpen() { return opened; },
+
+    // Ask the transport rather than trusting our own flag. `opened` means "a game
+    // is in progress in this room", and stays true across a drop on purpose: the
+    // room is still this player's. It used to be what isOpen() returned, which
+    // made it impossible to tell a live connection from a dead one, so the guest's
+    // whole rejoin loop checked a condition that was never false and gave up
+    // without making a single attempt.
+    isOpen() { return opened && !!active && (active.isOpen ? active.isOpen() : true); },
     mode() { return mode; },
 
     // Merged connection details for the "Connection details" readout. Both halves

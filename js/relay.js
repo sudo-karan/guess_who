@@ -23,7 +23,10 @@
 // PRIVACY: a relayed game's messages (display names, chat, moves) pass through a
 // public service and are readable by anyone who knows the room topic. Direct
 // WebRTC is always tried first and is end-to-end encrypted; this is the fallback.
-// A per-session token keeps a stray or stale publisher from corrupting a game.
+// A per-session token lets a player who refreshes rejoin without being approved
+// again, and keeps a stray or stale publisher out of a game. It is not a secret,
+// though: it has to be handed over on the same public topic, so the host also
+// refuses to let a token displace an opponent who is still talking.
 //
 // The interface is deliberately identical to createOnlineChannel() in net.js, so
 // the two are interchangeable and can be composed (see channel.js).
@@ -89,6 +92,9 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
   let prompted = false;       // host: have we already raised this join request
   let promptedSid = null;     // ...and whose it was
   let lastJoinAt = 0;         // when that requester was last heard from
+  let lastPeerAt = 0;         // when the peer we are playing was last heard from
+  let appliedEpoch = 0;       // host: the highest resume we have acted on
+  let resumedSid = null;      // ...and whose, for a guest too old to send an epoch
   let joinTimer = null, joinTries = 0;
   let resubs = 0;
   const seen = new Set();     // ntfy message ids already handled (SSE may re-deliver)
@@ -99,6 +105,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
   };
   let sessionToken = null;   // identifies this match, so a refresh is a reconnect
   let resumeToken = null;    // guest side: the token to come back with
+  let resumeEpoch = 0;       // guest side: which return attempt this is
   // Everything the "Connection details" readout needs to explain a stuck room.
   const diag = { sent: 0, failed: 0, throttled: 0, lastStatus: null, sub: 'not started' };
 
@@ -257,6 +264,29 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
 
   /* ---------------------------- delivery ------------------------------ */
 
+  // Has this return already been acted on? A returning guest republishes its JOIN
+  // every few seconds until it hears a verdict, and relay round-trips routinely
+  // take longer than that, so repeats are normal. Re-sending the ACCEPT is free,
+  // but acting on one twice is not: `resumed` restarts the delivery layer's
+  // numbering, and doing that a second time leaves it asking for a message the
+  // other side threw away long ago, which wedges that direction of the stream for
+  // the rest of the match with no error anywhere.
+  //
+  // The epoch is minted by the guest and counts up, so retries of one attempt
+  // share a number, a stale attempt arrives with a lower one, and a duplicated
+  // browser tab replays a number already used. A guest that sends none at all
+  // falls back to its session id, which is enough to dedupe plain retries.
+  function newResume(msg, from) {
+    if (Number.isFinite(msg.epoch)) {
+      if (msg.epoch <= appliedEpoch) return false;
+      appliedEpoch = msg.epoch;
+      return true;
+    }
+    if (from && from === resumedSid) return false;
+    resumedSid = from;
+    return true;
+  }
+
   function route(msg) {
     const t = msg.__t;
     // Both guests of a busy room share one topic, so a verdict is addressed to the
@@ -265,16 +295,31 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
     // Otherwise only listen to the peer we're in a session with — except for a
     // JOIN, which is how a NEW peer introduces itself.
     if (peerSid && msg.__s && msg.__s !== peerSid && t !== H.JOIN) return;
+    if (peerSid && msg.__s === peerSid) lastPeerAt = Date.now();
 
     if (amHost) {
       if (t === H.JOIN) {
         const from = msg.__s || null;
+        const tokenOk = !!sessionToken && msg.resume === sessionToken;
+        // A token proves less here than it looks like it does. It has to be handed
+        // over on a public topic, so anyone subscribed to the room can read it out
+        // of the ACCEPT frame, live or later out of the service's retained
+        // history. So refuse to hand the game to a second holder while the first
+        // is still talking: that is a takeover, not a refresh. Silence rather than
+        // FULL on purpose, since FULL is terminal on the guest and would kill the
+        // retries a real refresh depends on.
+        if (tokenOk && opened && from !== peerSid
+            && Date.now() - lastPeerAt < joinRetryMs * 2) return;
         // Same player returning after a refresh, with the token we issued when we
         // first let them in. Straight back into the match, no second approval.
-        if (sessionToken && msg.resume === sessionToken) {
+        if (tokenOk) {
           prompted = true; promptedSid = from; lastJoinAt = Date.now();
-          peerSid = from; opened = true;
+          peerSid = from; opened = true; lastPeerAt = Date.now();
+          // Always re-sent, even for a repeat: on a fire-and-forget relay this
+          // frame is the only thing the returning player is waiting for, and it
+          // is exactly the kind of thing that gets lost.
           publish({ __t: H.ACCEPT, to: from, token: sessionToken, resumed: true });
+          if (!newResume(msg, from)) return;
           status('Opponent reconnected.');
           cbs.resumed && cbs.resumed();
           armBackfill();
@@ -306,8 +351,11 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
         const free = () => { prompted = false; promptedSid = null; peerSid = null; };
         const accept = () => {
           if (opened || closed) { free(); return; }   // committed nothing: don't wedge the room
-          opened = true;
-          if (!sessionToken) sessionToken = token(16);
+          opened = true; lastPeerAt = Date.now();
+          if (!sessionToken) {
+            sessionToken = token(16);
+            cbs.token && cbs.token(sessionToken);   // the host needs it too (see net.js)
+          }
           publish({ __t: H.ACCEPT, to: from, token: sessionToken });
           status('Connected!');
           cbs.open && cbs.open();
@@ -400,10 +448,11 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
       onReady && onReady(code);
     },
 
-    join(code, name, resume) {
+    join(code, name, resume, epoch) {
       amHost = false;
       sid = token();
       if (resume) resumeToken = resume;
+      if (Number.isFinite(epoch)) resumeEpoch = epoch;
       myName = String(name || '').slice(0, 14);
       outTopic = relayTopic(code, 'h');     // guest publishes to the host's topic
       subscribe(relayTopic(code, 'g'));
@@ -412,6 +461,7 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
         joinTries++;
         const frame = { __t: H.JOIN, name: myName };
         if (resumeToken) frame.resume = resumeToken;
+        if (resumeToken && resumeEpoch) frame.epoch = resumeEpoch;
         const ok = await publish(frame);
         // A JOIN that never left the building is the one failure the player must
         // not be left guessing about: the host simply never heard them.
