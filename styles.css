@@ -88,7 +88,7 @@ body {
 .name-row input:focus, .code-input:focus, #chat-input:focus { border-color: var(--purple); }
 
 .online-actions { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: start; }
-.online-col { display: flex; flex-direction: column; gap: 12px; align-items: stretch; }
+.online-col { display: flex; flex-direction: column; gap: 12px; align-items: stretch; min-width: 0; }
 .online-col h3 { margin: 0 0 4px; text-align: center; }
 .online-divider { display: flex; align-items: center; justify-content: center; color: var(--ink-soft); font-weight: 700; }
 .online-divider span {
@@ -370,7 +370,7 @@ body {
 .chat-form input { flex: 1; min-width: 0; padding: 8px 10px; border: 2px solid var(--line); border-radius: 10px; font-family: inherit; }
 
 .controls {
-  display: flex; gap: 12px; justify-content: center; align-items: center;
+  display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; align-items: center;
   position: sticky; bottom: 0; z-index: 5; margin-top: 8px;
   padding: 16px 0 10px;
   /* fade the board out behind the buttons so they read as a footer, not an overlap */
@@ -484,14 +484,67 @@ body {
   font-weight: 800; color: var(--yellow); font-size: 0.98rem;
   margin-bottom: 6px; padding-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.18);
 }
-.tt-row { display: flex; justify-content: space-between; gap: 14px; padding: 1.5px 0; }
+.tt-row { display: flex; justify-content: space-between; gap: 10px; padding: 1.5px 0; min-width: 0; }
+.tt-label, .tt-val { min-width: 0; overflow-wrap: anywhere; }
 .tt-label { opacity: 0.72; }
 .tt-val { font-weight: 700; text-align: right; }
 
 /* make the secret card feel hoverable */
 .ms-card { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: help; }
 
+/* Whether the other player is still choosing, shown during setup. */
+.setup-opp {
+  text-align: center; margin: 0 auto 10px; max-width: 520px;
+  font-weight: 700; font-size: 0.9rem; padding: 7px 14px; border-radius: 999px;
+  background: #eafaf1; color: #1b7a4b; border: 1px solid #bde9d1;
+}
+.setup-opp.hidden { display: none; }
+.setup-opp.waiting { background: #fff6e0; color: #8a6400; border-color: #f2dca0; }
+
+/* ------------------ card details, press and hold (touch) ------------- */
+.card-detail {
+  position: fixed; inset: 0; z-index: 80;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px; background: rgba(30, 20, 60, 0.55);
+  animation: fade 0.12s ease;
+}
+.card-detail.hidden { display: none; }
+.cd-panel {
+  position: relative; width: min(320px, 100%); min-width: 0; max-width: 100%;
+  background: var(--ink); color: #fff; border-radius: 16px;
+  padding: 18px 18px 16px; box-shadow: var(--shadow); text-align: left;
+  max-height: 80vh; overflow-y: auto;
+}
+.cd-close {
+  position: absolute; top: 8px; right: 8px;
+  width: 34px; height: 34px; min-width: 34px; border: 0; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16); color: #fff;
+  font-size: 1rem; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.cd-close:hover, .cd-close:focus-visible { background: rgba(255, 255, 255, 0.3); }
+.cd-panel .tt-name { font-size: 1.1rem; padding-right: 34px; }
+.cd-panel .tt-row { padding: 4px 0; font-size: 0.95rem; }
+
+/* On a touch device the browser's own press-and-hold menu would fight ours. */
+.touch .char, .touch .ms-card, .touch .reveal-card, .touch .log-card {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* --------------------------- responsive ----------------------------- */
+/* Four full-width buttons stop fitting long before phone widths. */
+@media (max-width: 900px) {
+  .controls .btn { min-width: 0; flex: 1 1 auto; }
+}
+
+/* Fingers need bigger targets than a mouse pointer does. */
+@media (hover: none), (pointer: coarse) {
+  .fchip { padding: 9px 13px; font-size: 0.8rem; }
+  .btn.tiny { min-height: 40px; padding: 8px 14px; }
+  .cd-close { width: 40px; height: 40px; min-width: 40px; }
+}
+
 @media (max-width: 1000px) {
   /* drop the filter rail under the board so the board stays wide */
   .play-body { grid-template-columns: 1fr 240px; }
@@ -508,13 +561,24 @@ body {
 }
 @media (max-width: 620px) {
   .mode-cards { grid-template-columns: 1fr; max-width: 360px; }
+  /* A grid item will not shrink past its content unless told to, so the two
+     columns kept the online panel wider than the phone it was on. */
   .online-actions { grid-template-columns: 1fr; }
+  .online-actions > * { min-width: 0; }
+  .name-row label { flex-wrap: wrap; }
+  .name-row input, .code-input { min-width: 0; width: 100%; }
+  .code-input { letter-spacing: 4px; font-size: 1.3rem; }
   .online-divider span { width: 34px; height: 34px; }
   .setup-grid { grid-template-columns: repeat(4, 1fr); }
   .play-grid { grid-template-columns: repeat(3, 1fr); }
+  /* Two 150px filter columns plus their gap do not fit a phone, and the wider
+     touch-sized chips made it worse. One column, free to shrink. */
+  .filter-panel { flex-direction: column; gap: 10px; }
+  .filter-sec { min-width: 0; }
+  .filters, .side, .side-block, .board-wrap { min-width: 0; }
   .bar { flex-direction: column; align-items: flex-start; }
   .char .cname { font-size: 0.7rem; }
-  .controls .btn { min-width: 0; flex: 1; }
+  .controls .btn { min-width: 0; flex: 1 1 calc(50% - 12px); padding-left: 8px; padding-right: 8px; }
 }
 @media (max-width: 420px) {
   .setup-grid { grid-template-columns: repeat(3, 1fr); }

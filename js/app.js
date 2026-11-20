@@ -4,6 +4,7 @@ import { createEngine, BOARD_SIZE } from './engine.js';
 import { createLocalPair, savedTurn, saveTurn } from './net.js';
 import { createGameChannel } from './channel.js';
 import { createReliableChannel } from './reliable.js';
+import { saveSession, loadSession, clearSession } from './session.js';
 import { relayAvailable } from './relay.js';
 import { createLobby, ROOM_STATUS } from './lobby.js';
 import { commonTraitsText, netBatchesByTurnActor } from './loganalysis.js';
@@ -90,11 +91,38 @@ function tooltipHTML(ch) {
   return `<div class="tt-name">${ch.name}</div>${rows}`;
 }
 
-// Floating tooltip that shows a character's full trait breakdown on hover.
+const CARD_SEL = '.char, .ms-card, .reveal-card, .log-card';
+
+// Does this device point with a finger rather than a mouse? Checked once per
+// call rather than cached, so a tablet with a keyboard attached behaves sensibly
+// either way.
+function isTouch() {
+  return typeof window !== 'undefined' && window.matchMedia
+    ? window.matchMedia('(hover: none), (pointer: coarse)').matches
+    : false;
+}
+
+const LONG_PRESS_MS = 450;
+const LONG_PRESS_SLOP = 12;   // a finger that drifts this far is scrolling, not holding
+
+// Two ways to see a character's traits, one per kind of device.
+//
+// With a mouse, the tooltip follows the pointer. On a touch screen that same
+// code used to fire on a plain tap (browsers synthesise mouse events from taps)
+// and then stay on screen, because there is no pointer to move away. So touch
+// devices get a panel you open by pressing and holding, and close deliberately.
+// A plain tap is left alone, since that is how you pick and cross off cards.
 function initTooltip() {
   const tip = $('#tooltip');
+  const panel = $('#card-detail');
+  const body = $('#cd-body');
+
+  if (isTouch()) document.body.classList.add('touch');
+
+  /* ---------------------------- mouse ---------------------------- */
   document.addEventListener('mousemove', (e) => {
-    const el = e.target.closest('.char, .ms-card, .reveal-card, .log-card');
+    if (isTouch()) return;                 // taps synthesise these; ignore them
+    const el = e.target.closest(CARD_SEL);
     const ch = el && CHAR_BY_ID[Number(el.dataset.id)];
     if (!ch) { tip.classList.add('hidden'); return; }
     tip.innerHTML = tooltipHTML(ch);
@@ -107,8 +135,67 @@ function initTooltip() {
     tip.style.left = Math.max(8, left) + 'px';
     tip.style.top = Math.max(8, top) + 'px';
   }, { passive: true });
-  // Hide when the pointer leaves the window entirely.
   document.addEventListener('mouseleave', () => tip.classList.add('hidden'));
+
+  /* ------------------------ press and hold ----------------------- */
+  let timer = null, startX = 0, startY = 0, swallowClick = false;
+
+  const cancel = () => { clearTimeout(timer); timer = null; };
+
+  const open = (ch) => {
+    body.innerHTML = tooltipHTML(ch);
+    panel.classList.remove('hidden');
+    const close = $('#cd-close');
+    if (close) close.focus();
+  };
+
+  const close = () => panel.classList.add('hidden');
+
+  document.addEventListener('touchstart', (e) => {
+    const el = e.target.closest(CARD_SEL);
+    // Starting a new touch always clears the last one's leftovers. Without this,
+    // a long press that the browser does not follow with a click would leave the
+    // flag set and swallow the player's next tap instead.
+    swallowClick = false;
+    const ch = el && CHAR_BY_ID[Number(el.dataset.id)];
+    if (!ch || e.touches.length !== 1) { cancel(); return; }
+    startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+    cancel();
+    timer = setTimeout(() => {
+      timer = null;
+      swallowClick = true;      // the tap that ends this hold must not also play the card
+      tip.classList.add('hidden');
+      open(ch);
+    }, LONG_PRESS_MS);
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!timer || !e.touches.length) return;
+    const dx = e.touches[0].clientX - startX, dy = e.touches[0].clientY - startY;
+    if (Math.hypot(dx, dy) > LONG_PRESS_SLOP) cancel();   // they are scrolling
+  }, { passive: true });
+
+  document.addEventListener('touchend', cancel, { passive: true });
+  document.addEventListener('touchcancel', cancel, { passive: true });
+
+  // Swallow the click the browser sends after a long press, so holding a card to
+  // read it never also crosses it off.
+  document.addEventListener('click', (e) => {
+    if (!swallowClick) return;
+    swallowClick = false;
+    if (e.target.closest(CARD_SEL)) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+
+  // Android pops its own menu on a long press; ours replaces it.
+  document.addEventListener('contextmenu', (e) => {
+    if (isTouch() && e.target.closest(CARD_SEL)) e.preventDefault();
+  });
+
+  $('#cd-close').onclick = close;
+  panel.addEventListener('click', (e) => { if (e.target === panel) close(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !panel.classList.contains('hidden')) close();
+  });
 }
 
 /* --------------------------- game controller ------------------------ */
@@ -362,12 +449,14 @@ function teardownOnline() {
 }
 
 /* ------------------------------ online ------------------------------ */
-function makeOnlineEngine(isHost) {
-  const name = ($('#online-name').value || '').trim().slice(0, 14) || (isHost ? 'Player 1' : 'Player 2');
+function makeOnlineEngine(isHost, forcedName) {
+  const name = forcedName
+    || ($('#online-name').value || '').trim().slice(0, 14)
+    || (isHost ? 'Player 1' : 'Player 2');
   const engine = createEngine({ isHost, myName: name });
   engine.on('send', (m) => G.channel.send(m));
   engine.on('log', (t) => toast(t));
-  engine.on('change', (s) => routeOnline(s));
+  engine.on('change', (s) => { routeOnline(s); saveSessionNow(); });
   engine.on('ask', (who) => noticeModal({
     title: `💬 ${who} is asking a question`,
     body: `<b>${escapeHTML(who)}</b> chose to ask a question this turn. Answer them (use the chat if you like). They can't guess this turn.`,
@@ -398,17 +487,32 @@ function onOnlineMessage(m, engine) {
   engine.handleMessage(m);
 }
 
-function hostOnline() {
-  const name = ($('#online-name').value || '').trim().slice(0, 14) || 'Player 1';
+// `resume` is a saved game being picked back up after a reload, in which case
+// the room keeps its old code and the engine is restored rather than rebuilt.
+function hostOnline(resume) {
+  const name = resume ? resume.myName
+    : (($('#online-name').value || '').trim().slice(0, 14) || 'Player 1');
   // Re-hosting must not leak a second room or leave the old game peer alive.
   teardownOnline();
   G.mode = 'online';
   G.channel = createReliableChannel(createGameChannel());
-  const engine = makeOnlineEngine(true);
+  const engine = makeOnlineEngine(true, name);
+  if (resume) {
+    setRoster(resume.roster);
+    engine.restore(resume.engine);
+    G.channel.useSessionToken(resume.token);
+  }
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
   G.channel.onJoinRequest((who, ctl) => showJoinApproval(who, ctl));
   G.channel.onHealthy(netRecovered);
+  G.channel.onToken((t) => { sessionToken = t; saveSessionNow(); });
+  G.channel.onResumed(() => {
+    stopRejoining();
+    setNetStatus('Opponent reconnected.', 'ok');
+    netRecovered();
+    routeOnline(engine.state);        // back to whatever screen the game was on
+  });
   G.channel.onOpen(() => {
     setNetStatus('Opponent connected!', 'ok');
     noteTransport();
@@ -423,38 +527,125 @@ function hostOnline() {
     $('#host-code').classList.remove('hidden');
     $('#code-value').textContent = code;
     showNetDetails(false);   // available, collapsed: lets the host confirm it is listening
+    hostedRoom = code;
+    resumeCtx = { code, isHost: true, myName: name };
+    saveSessionNow();
+    if (resume) { setNetStatus('Room re-opened. Waiting for your opponent to come back…'); return; }
     // Advertise the room so friends can find it in the browser.
     ensureLobby();
-    hostedRoom = code;
     if (lobby) lobby.publish({ code, hostName: name, status: ROOM_STATUS.OPEN });
+  }, resume && resume.code);
+}
+
+/* ------------------- surviving a reload, online only ------------------ */
+// What it takes to pick this game back up: which room, which side, the cast,
+// the token that proves we were already in it, and the engine's own state.
+let resumeCtx = null;       // { code, isHost, myName }
+let sessionToken = null;
+
+function saveSessionNow() {
+  if (G.mode !== 'online' || !resumeCtx || !activeEngine) return;
+  const st = activeEngine.state;
+  if (st.phase === 'over') { clearSession(); return; }
+  saveSession({
+    code: resumeCtx.code,
+    isHost: resumeCtx.isHost,
+    myName: resumeCtx.myName,
+    token: sessionToken,
+    roster: ROSTER,        // the cast itself: the guest is sent it, not told how to build it
+    engine: activeEngine.snapshot(),
   });
 }
 
+function forgetSession() {
+  stopRejoining();
+  resumeCtx = null; sessionToken = null;
+  clearSession();
+}
+
+// On load, put the player back where they were. There is nothing to decide
+// here: they did not ask to leave, so we go straight back and tell them.
+function resumeSavedGame() {
+  const saved = loadSession();
+  if (!saved) return false;
+  $('#online-panel').classList.remove('hidden');
+  setNetStatus(saved.isHost
+    ? 'Picking your game back up. Re-opening your room…'
+    : 'Picking your game back up. Reconnecting…');
+  if (saved.isHost) hostOnline(saved);
+  else joinOnline(null, saved);
+  return true;
+}
+
+// The host keeps its room open and simply waits, since its opponent knows the
+// code and holds a token. The guest has to go back and knock again.
+let rejoinTimer = null, rejoinTries = 0;
+const REJOIN_TRIES = 5;
+
+function scheduleRejoin() {
+  if (rejoinTimer || !resumeCtx || resumeCtx.isHost) return;
+  const go = () => {
+    rejoinTimer = null;
+    if (!resumeCtx) return;
+    if (G.channel && G.channel.isOpen()) { rejoinTries = 0; return; }
+    if (rejoinTries >= REJOIN_TRIES) {
+      showDisconnected('🔌', 'Opponent left',
+        'Your opponent did not come back. The game can\'t continue.');
+      return;
+    }
+    rejoinTries++;
+    const saved = loadSession();
+    if (!saved) return;
+    setNetStatus('Trying to get back into the game…');
+    joinOnline(null, saved);
+    rejoinTimer = setTimeout(go, 6000);
+  };
+  rejoinTimer = setTimeout(go, 2500);
+}
+
+function stopRejoining() { clearTimeout(rejoinTimer); rejoinTimer = null; rejoinTries = 0; }
+
 let joinWaitHint = null;
-function joinOnline(codeArg) {
-  const code = String(codeArg || $('#join-code').value).trim().toUpperCase();
+function joinOnline(codeArg, resume) {
+  const code = resume ? resume.code : String(codeArg || $('#join-code').value).trim().toUpperCase();
   if (!code) { setNetStatus('Enter a room code first.', 'error'); return; }
-  if (hostedRoom && code === hostedRoom) {
+  if (!resume && hostedRoom && code === hostedRoom) {
     setNetStatus("That's your own room. Share the code with a friend so they can join.", 'error');
     return;
   }
-  const name = ($('#online-name').value || '').trim().slice(0, 14) || 'Player 2';
+  const name = resume ? resume.myName
+    : (($('#online-name').value || '').trim().slice(0, 14) || 'Player 2');
   // Leaving our own room (or a half-open prior attempt) to join someone else:
   // tear it down so we don't strand a dead, still-advertised room.
   teardownOnline();
   G.mode = 'online';
   G.channel = createReliableChannel(createGameChannel());
-  const engine = makeOnlineEngine(false);
+  const engine = makeOnlineEngine(false, name);
+  if (resume) {
+    setRoster(resume.roster);
+    engine.restore(resume.engine);
+  }
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
   G.channel.onHealthy(netRecovered);
+  G.channel.onToken((t) => { sessionToken = t; saveSessionNow(); });
+  G.channel.onResumed(() => {
+    clearTimeout(joinWaitHint);
+    stopRejoining();
+    setNetStatus('Reconnected.', 'ok');
+    netRecovered();
+    routeOnline(engine.state);
+  });
   G.channel.onOpen(() => {
     clearTimeout(joinWaitHint);
     setNetStatus('Connected! Dealing the characters…', 'ok');
     noteTransport();
   });
   G.channel.onError(handleNetError);
-  G.channel.join(code, name);
+  resumeCtx = { code, isHost: false, myName: name };
+  if (resume) sessionToken = resume.token;
+  saveSessionNow();
+  G.channel.join(code, name, resume && resume.token);
   // Waiting on a host who may never have heard us raises no error at all, so
   // surface the details panel once the wait stops looking normal.
   clearTimeout(joinWaitHint);
@@ -470,6 +661,7 @@ function routeOnline(s) {
     prevOnlineTurn = null;
     // Only reached again after a rematch reset; re-enter the board builder.
     if (!screens.setup.classList.contains('active')) enterSetup(activeEngine);
+    showOppSetupState(s);
   } else if (s.phase === 'waiting') {
     prevOnlineTurn = null;
     showPass({ title: 'Board locked in! 🔒', sub: 'Waiting for your opponent to finish setting up…' });
@@ -502,8 +694,13 @@ function handleNetError(e) {
   // forever (e.g. on "Awaiting result…"). Drive it to a terminal screen with a
   // way home instead — but ONLY when the game really is over.
   if (G.mode === 'online' && activeEngine && activeEngine.state.phase !== 'over') {
-    if (TERMINAL_NET_ERRORS.includes(e && e.type)) showDisconnected();
-    else softNetTrouble(msg);
+    if (TERMINAL_NET_ERRORS.includes(e && e.type)) { showDisconnected(); return; }
+    if (e && e.type === 'closed' && resumeCtx) {
+      softNetTrouble('Your opponent dropped out.');
+      scheduleRejoin();
+      return;
+    }
+    softNetTrouble(msg);
     return;
   }
   toast('⚠️ ' + msg);
@@ -515,7 +712,11 @@ function handleNetError(e) {
 // interruption the connection recovers from on its own, and must NOT tear down a
 // live match. Getting this wrong told the player whose turn it wasn't, sitting
 // idle and receiving nothing, that their opponent had left.
-const TERMINAL_NET_ERRORS = ['closed', 'denied', 'full', 'nosuchroom', 'unsupported', 'code'];
+// 'closed' is deliberately NOT here. A connection closing is exactly what the
+// other player refreshing their page looks like from this side, and it is also
+// what a phone backgrounding a tab looks like. We hold the game open for a
+// while and let them come back instead of ending a match nobody meant to end.
+const TERMINAL_NET_ERRORS = ['denied', 'full', 'nosuchroom', 'unsupported', 'code'];
 const NET_GRACE_MS = 45000;   // how long a silent interruption may last before we call it
 
 let netGraceTimer = null;
@@ -574,6 +775,7 @@ function showDisconnected(emoji, title, sub) {
 function startLocal() {
   // Tear down any online room/channel so we don't leave a stale room advertised
   // and a late joiner can't hijack this game.
+  forgetSession();      // choosing another mode gives up on the online game
   teardownOnline();
   G.mode = 'local';
   activeEngine = null;
@@ -643,6 +845,7 @@ let robotBusy = false;      // guards against overlapping robot turns
 let robotPendingQ = null;   // the structured question the robot is awaiting an answer to
 
 function startRobot(difficulty) {
+  forgetSession();      // choosing another mode gives up on the online game
   teardownOnline();
   G.mode = 'robot';
   G.difficulty = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : 'medium';
@@ -731,7 +934,31 @@ function enterSetup(engine, onDone) {
   $('#setup-clear').classList.remove('hidden');
   $('#setup-random').classList.remove('hidden');
   updateSetupUI();
+  oppWasReady = false;
+  if (G.mode === 'online') showOppSetupState(engine.state);
+  else $('#setup-opp').classList.add('hidden');
   showScreen('setup');
+}
+
+// While you are still building your board, say whether the other player is
+// still choosing too or has already locked in and is waiting on you. Without
+// this, setup is the one part of an online game where you get no sign at all
+// that anyone else is there.
+let oppWasReady = false;
+function showOppSetupState(s) {
+  const el = $('#setup-opp');
+  if (!el || G.mode !== 'online') return;
+  const name = (s && s.oppName) || 'Your opponent';
+  if (s && s.oppReady) {
+    el.textContent = `🔒 ${name} has locked in their board and is waiting for you.`;
+    el.className = 'setup-opp waiting';
+    if (!oppWasReady) toast(`🔒 ${name} locked in their board.`);
+    oppWasReady = true;
+  } else {
+    el.textContent = `⏳ ${name} is still building their board.`;
+    el.className = 'setup-opp';
+    oppWasReady = false;
+  }
 }
 
 function updateSetupUI() {
@@ -1406,6 +1633,7 @@ function initOverControls() {
     }
   };
   $('#btn-home').onclick = () => {
+    forgetSession();        // leaving on purpose is not something to resume
     if (G.channel) { G.channel.close(); G.channel = null; }
     G.mode = null; G.A = null; G.B = null; activeEngine = null;
     location.reload();
@@ -1420,3 +1648,6 @@ initOverControls();
 initTooltip();
 initTurnPopup();
 initQuestionUI();
+// If this tab was in the middle of an online game before it reloaded, go back
+// to it rather than dropping the player on the front page.
+resumeSavedGame();

@@ -38,7 +38,12 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
   let opened = false;
   let done = false;           // terminal error already reported
   let mode = 'direct';        // 'direct' | 'relay'
-  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null, healthy: null };
+  const cbs = {
+    data: null, open: null, error: null, status: null, joinRequest: null,
+    healthy: null, resumed: null, token: null,
+  };
+  let sessionToken = null;
+  let resumeToken = null;
 
   const status = (t) => { if (!done) cbs.status && cbs.status(t); };
 
@@ -71,6 +76,14 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
   // listening on nothing with no error shown.
   function wire(ch, label, claim) {
     if (ch.onHealthy) ch.onHealthy(() => { if (!active || active === ch) recovered(); });
+    if (ch.onToken) ch.onToken((t) => { sessionToken = t; cbs.token && cbs.token(t); });
+    if (ch.onResumed) ch.onResumed(() => {
+      if (opened && active !== ch) { shut(ch); return; }
+      claim();
+      opened = true;
+      recovered();
+      cbs.resumed && cbs.resumed();
+    });
     ch.onData((m) => { if (active === ch) cbs.data && cbs.data(m); });
     ch.onStatus((t) => { if (!active || active === ch) status(label ? `${label} ${t}` : t); });
     ch.onJoinRequest((who, ctl) => {
@@ -99,19 +112,28 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
 
   /* -------------------------------- host -------------------------------- */
 
-  function startHost(onCode, attempt) {
-    const code = randomCode();
+  function startHost(onCode, attempt, fixedCode) {
+    const code = fixedCode || randomCode();
     direct = mkDirect();
     let settled = false;
 
+    if (sessionToken && direct.useSessionToken) direct.useSessionToken(sessionToken);
     const claimDirect = () => { active = direct; mode = 'direct'; shut(relay); relay = null; };
     wire(direct, '', claimDirect);
     direct.onError((e) => {
       // A code collision on the shared broker: roll a new one so BOTH transports
       // keep advertising the same room code.
-      if (e.type === 'taken' && !settled && attempt < HOST_RETRIES) {
+      if (e.type === 'taken' && !settled && attempt < HOST_RETRIES && !fixedCode) {
         shut(direct); direct = null;
         startHost(onCode, attempt + 1);
+        return;
+      }
+      // Re-opening a specific room: the broker may still hold our old
+      // registration for a few seconds after a refresh, so wait rather than
+      // move to a code our opponent has never seen.
+      if (e.type === 'taken' && fixedCode && !settled) {
+        shut(direct); direct = null;
+        setTimeout(() => { if (!settled) startHost(onCode, attempt + 1, fixedCode); }, 2000);
         return;
       }
       if (active === direct || opened) { fail(e.type, e.message); return; }
@@ -130,6 +152,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
   function openRelayHost(code, onCode) {
     if (canRelay()) {
       relay = mkRelay();
+      if (sessionToken && relay.useSessionToken) relay.useSessionToken(sessionToken);
       wire(relay, 'Relay:', () => { active = relay; mode = 'relay'; shut(direct); direct = null; });
       // Without this the host's relay failures went nowhere at all: a throttled or
       // dead relay subscription left the room silently deaf to join requests while
@@ -150,7 +173,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
 
   /* -------------------------------- join -------------------------------- */
 
-  function startJoin(code, name) {
+  function startJoin(code, name, resume) {
     direct = mkDirect();
     let switched = false;
 
@@ -170,7 +193,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
         if (e.type === 'timeout') { fail('timeout', 'No room found with that code, or the host has left. Check the code and try again.'); return; }
         fail(e.type, e.message);
       });
-      relay.join(code, name);
+      relay.join(code, name, resume);
     };
 
     wire(direct, '', () => { active = direct; });
@@ -181,7 +204,7 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
       if (e.type === 'nosuchroom' || e.type === 'broker' || e.type === 'peer') { toRelay(e.message); return; }
       fail(e.type, e.message);
     });
-    direct.join(code, name);
+    direct.join(code, name, resume);
   }
 
   /* --------------------------------- api -------------------------------- */
@@ -195,22 +218,37 @@ export function createGameChannel({ makePeer, relayOpts, makeDirect, makeRelay }
     // Called when reported trouble has cleared and the transport is working again.
     onHealthy(fn) { cbs.healthy = fn; },
 
-    host(onCode) {
+    // `code` re-opens a specific room, which is how a host comes back after a
+    // refresh: the room keeps the code their opponent already has.
+    host(onCode, code) {
       if (!canDirect() && !canRelay()) {
         fail('unsupported', 'Online play needs an internet connection.');
         return;
       }
-      startHost(onCode, 0);
+      startHost(onCode, 0, code);
     },
 
-    join(code, name) {
+    join(code, name, resume) {
       const clean = String(code || '').trim().toUpperCase();
       if (!clean) { fail('code', 'Enter a room code.'); return; }
       if (!canDirect() && !canRelay()) {
         fail('unsupported', 'Online play needs an internet connection.');
         return;
       }
-      startJoin(clean, name);
+      if (resume) resumeToken = resume;
+      startJoin(clean, name, resume);
+    },
+
+    onResumed(fn) { cbs.resumed = fn; },
+    onToken(fn) { cbs.token = fn; },
+    sessionToken() { return sessionToken; },
+    // A host coming back after a refresh already knows the token it issued, so
+    // its returning opponent is recognised rather than treated as a newcomer.
+    useSessionToken(t) {
+      if (!t) return;
+      sessionToken = t; resumeToken = t;
+      if (direct && direct.useSessionToken) direct.useSessionToken(t);
+      if (relay && relay.useSessionToken) relay.useSessionToken(t);
     },
 
     send(msg) { if (active) active.send(msg); },

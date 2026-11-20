@@ -29,11 +29,23 @@ When the game ends, both players get the full log: every question, answer and
 chat line with who sent it and when, the cards each player crossed off with
 pictures, and the trait those cards had in common.
 
+**On a phone or tablet**, tap a card to pick or cross it off as usual, and press
+and hold it to read its traits. The panel that opens stays until you close it,
+which is easier than trying to hover on a touchscreen.
+
+**Refreshing is safe.** If you reload the page, close the tab by accident, or
+your phone reloads it for you, the game comes back: your board, your secret,
+what you had crossed off and the log are all restored, and you rejoin the same
+room without the host having to approve you again. Your opponent sees a short
+"reconnecting" notice rather than being told you left. It gives up after about a
+minute, so someone who really has gone is still noticed. Going back to the menu
+on purpose ends the game properly, as you would expect.
+
 ## Play modes
 
 | Mode | How it works |
 | --- | --- |
-| 🌍 **Online** | One player hosts and gets a 4-letter room code. The other joins with the code, or picks the room from the list of open rooms. The host approves them before the game starts. |
+| 🌍 **Online** | One player hosts and gets a 4-letter room code. The other joins with the code, or picks the room from the list of open rooms. The host approves them before the game starts. While you are building your board you can see whether the other player is still choosing or already waiting on you. |
 | 🛋️ **Pass & Play** | Both players share one device, with "look away" screens between hand-offs so secrets stay secret. |
 | 🤖 **Play a Robot** | Solo, against a computer opponent at easy, medium or hard. Hard picks questions that split the remaining cards as evenly as it can, and only guesses when it is sure. |
 
@@ -149,6 +161,25 @@ leave both players waiting forever. `js/reliable.js` numbers every message, has
 the receiver confirm what it has, and resends anything unconfirmed. In the normal
 case confirmations ride along on the reply and cost nothing extra.
 
+**Coming back after a reload.** `js/session.js` keeps your own side of the game
+in `sessionStorage`, which is per tab and goes when the tab does. When the host
+first lets a player in it issues a token; the player presents that token to get
+straight back in, so a refresh is a reconnection rather than a stranger
+knocking, and the host is not asked to approve their own opponent twice. A host
+coming back re-opens the same room code, waiting out the broker's old
+registration if it has to. Both sides start their message numbering again on a
+resume, since the side that refreshed lost its counters, and anything that was
+never confirmed goes back on the wire.
+
+Both players refreshing at the same moment does recover: each restores its own
+side and the guest knocks again until the host is back. It can take a few
+seconds longer, because the broker may still be holding the host's old
+registration and it has to wait that out before re-opening the same code.
+
+What is not covered: a browser set to clear site data on close has nothing to
+come back to, and Pass & Play and the robot still start over on a reload, since
+neither has a room to rejoin.
+
 If both paths fail, **Pass & Play** and the **robot** work with no network at
 all.
 
@@ -168,6 +199,7 @@ js/
   relay.js             # HTTPS fallback transport, for networks WebRTC can't cross
   channel.js           # picks between them: direct first, relay if that fails
   reliable.js          # numbers messages and resends anything unconfirmed
+  session.js           # keeps a game in progress so a page reload does not end it
   lobby.js             # room discovery (a broadcast feed, no server of our own)
   app.js               # UI rendering + orchestration
   vendor/peerjs.min.js # vendored PeerJS (no runtime CDN dependency)

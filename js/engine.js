@@ -51,6 +51,7 @@ export function createEngine({ isHost, myName, now }) {
     // Turn state.
     turn: null,            // 'me' | 'opp'
     turnNumber: 0,
+    lastOppTurn: -1,       // highest hand-over we have applied, so a resend is ignored
     asked: false,          // did I ask a question this turn? (locks guessing)
     guessing: false,       // am I currently in guess-selection mode?
     pendingGuess: false,   // waiting for the opponent to validate my guess
@@ -323,6 +324,7 @@ export function createEngine({ isHost, myName, now }) {
     state.deduction = {};
     state.turn = null;
     state.turnNumber = 0;
+    state.lastOppTurn = -1;
     state.asked = false;
     state.guessing = false;
     state.pendingGuess = false;
@@ -361,6 +363,15 @@ export function createEngine({ isHost, myName, now }) {
         break;
       }
       case 'endTurn': {
+        // Handing over the turn is the one message it really matters not to apply
+        // twice: a repeat would wipe the undo history for the turn I am part way
+        // through and log the opponent's crossings-off a second time. A resumed
+        // connection can legitimately re-send something it never saw confirmed,
+        // so ignore a hand-over for a turn already taken.
+        if (Number.isFinite(msg.turn)) {
+          if (msg.turn <= state.lastOppTurn) break;
+          state.lastOppTurn = msg.turn;
+        }
         // Opponent finished their turn; adopt their reported progress + take turn.
         state.oppOpen = Number.isFinite(msg.open) ? msg.open : state.oppOpen;
         state.oppClosed = Number.isFinite(msg.closed) ? msg.closed : state.oppClosed;
@@ -453,9 +464,29 @@ export function createEngine({ isHost, myName, now }) {
     }
   }
 
+  // Save and reload a game in progress. The state is plain data apart from one
+  // Set, so a round trip through JSON is enough. This is what lets a player
+  // refresh the page, or come back after their browser killed the tab, and
+  // carry on from where they were instead of losing the match.
+  function snapshot() {
+    return JSON.parse(JSON.stringify({
+      ...state,
+      turnStartOff: [...state.turnStartOff],
+    }));
+  }
+
+  function restore(snap) {
+    if (!snap || typeof snap !== 'object' || !snap.phase) return false;
+    Object.assign(state, snap, { turnStartOff: new Set(snap.turnStartOff || []) });
+    change();
+    return true;
+  }
+
   return {
     state,
     on: ev.on,
+    // saving and reloading a game in progress
+    snapshot, restore,
     // setup
     setupLocal,
     // play actions

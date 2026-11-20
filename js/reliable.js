@@ -45,7 +45,7 @@ export function createReliableChannel(inner, {
   const early = new Map();    // seq -> frame, arrived before its turn
   let ackTimer = null, resendTimer = null;
   let troubled = false;
-  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null, healthy: null };
+  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null, healthy: null, resumed: null };
 
   const timer = (fn, ms) => {
     const t = setInterval(fn, ms);
@@ -165,6 +165,24 @@ export function createReliableChannel(inner, {
     if (ackTimer && typeof ackTimer.unref === 'function') ackTimer.unref();
   }
 
+  // Both sides start counting again, but anything the peer never confirmed is
+  // put back on the wire under the new numbering. Those are exactly the messages
+  // that may have been in flight when the other side refreshed, and dropping
+  // them is how a resumed game would end up out of step. The engine ignores a
+  // hand-over it has already applied, so a needless repeat is harmless.
+  function reset() {
+    clearInterval(resendTimer); resendTimer = null;
+    clearTimeout(ackTimer); ackTimer = null;
+    const unsent = [...outbox].sort((a, b) => a[0] - b[0]).map(([, it]) => it.frame);
+    outSeq = 0; want = 1; confirmed = 0; acked = 0;
+    outbox.clear(); early.clear();
+    troubled = false;
+    for (const frame of unsent) {
+      const { [SEQ]: _s, [ACK]: _a, ...msg } = frame;
+      sendApp(msg);
+    }
+  }
+
   /* -------------------------------- api -------------------------------- */
 
   inner.onData(handle);
@@ -180,8 +198,20 @@ export function createReliableChannel(inner, {
       if (inner.onHealthy) inner.onHealthy(fn);
     },
 
-    host(onCode) { inner.host(onCode); },
-    join(code, name) { inner.join(code, name); },
+    // A resumed match starts counting again from nothing on BOTH sides, because
+    // the side that refreshed lost its counters with the rest of the page. If
+    // only one side reset, everything the other sent would look like a message
+    // it had already seen and be thrown away.
+    onResumed(fn) {
+      cbs.resumed = fn;
+      if (inner.onResumed) inner.onResumed(() => { reset(); fn && fn(); });
+    },
+    onToken(fn) { if (inner.onToken) inner.onToken(fn); },
+    sessionToken() { return inner.sessionToken ? inner.sessionToken() : null; },
+    useSessionToken(t) { if (inner.useSessionToken) inner.useSessionToken(t); },
+
+    host(onCode, code) { inner.host(onCode, code); },
+    join(code, name, resume) { inner.join(code, name, resume); },
     send(msg) { sendApp(msg); },
     isOpen() { return inner.isOpen(); },
     mode() { return inner.mode ? inner.mode() : 'direct'; },
