@@ -93,7 +93,12 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
   let resubs = 0;
   const seen = new Set();     // ntfy message ids already handled (SSE may re-deliver)
   const chunks = new Map();   // reassembly buffers for oversized messages
-  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null, healthy: null };
+  const cbs = {
+    data: null, open: null, error: null, status: null, joinRequest: null,
+    healthy: null, resumed: null, token: null,
+  };
+  let sessionToken = null;   // identifies this match, so a refresh is a reconnect
+  let resumeToken = null;    // guest side: the token to come back with
   // Everything the "Connection details" readout needs to explain a stuck room.
   const diag = { sent: 0, failed: 0, throttled: 0, lastStatus: null, sub: 'not started' };
 
@@ -264,6 +269,17 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
     if (amHost) {
       if (t === H.JOIN) {
         const from = msg.__s || null;
+        // Same player returning after a refresh, with the token we issued when we
+        // first let them in. Straight back into the match, no second approval.
+        if (sessionToken && msg.resume === sessionToken) {
+          prompted = true; promptedSid = from; lastJoinAt = Date.now();
+          peerSid = from; opened = true;
+          publish({ __t: H.ACCEPT, to: from, token: sessionToken, resumed: true });
+          status('Opponent reconnected.');
+          cbs.resumed && cbs.resumed();
+          armBackfill();
+          return;
+        }
         if (opened) {                                  // room busy: tell the newcomer
           if (from !== peerSid) publish({ __t: H.FULL, to: from });
           return;
@@ -291,7 +307,8 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
         const accept = () => {
           if (opened || closed) { free(); return; }   // committed nothing: don't wedge the room
           opened = true;
-          publish({ __t: H.ACCEPT, to: from });
+          if (!sessionToken) sessionToken = token(16);
+          publish({ __t: H.ACCEPT, to: from, token: sessionToken });
           status('Connected!');
           cbs.open && cbs.open();
           armBackfill();
@@ -313,7 +330,15 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
       if (verdict) return;
       verdict = true; stopTimers();
       peerSid = msg.__s || null;
-      opened = true; status('Connected!');
+      if (msg.token) { sessionToken = msg.token; cbs.token && cbs.token(msg.token); }
+      opened = true;
+      if (msg.resumed) {
+        status('Reconnected.');
+        cbs.resumed && cbs.resumed();
+        armBackfill();
+        return;
+      }
+      status('Connected!');
       cbs.open && cbs.open();
       armBackfill();
       return;
@@ -349,6 +374,9 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
     onStatus(fn) { cbs.status = fn; },
     onJoinRequest(fn) { cbs.joinRequest = fn; },
     onHealthy(fn) { cbs.healthy = fn; },
+    onResumed(fn) { cbs.resumed = fn; },
+    onToken(fn) { cbs.token = fn; },
+    useSessionToken(t) { if (t) { sessionToken = t; resumeToken = t; } },
 
     diagnostics() {
       return {
@@ -372,16 +400,19 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
       onReady && onReady(code);
     },
 
-    join(code, name) {
+    join(code, name, resume) {
       amHost = false;
       sid = token();
+      if (resume) resumeToken = resume;
       myName = String(name || '').slice(0, 14);
       outTopic = relayTopic(code, 'h');     // guest publishes to the host's topic
       subscribe(relayTopic(code, 'g'));
       status('Asking the host to let you in…');
       const ask = async () => {
         joinTries++;
-        const ok = await publish({ __t: H.JOIN, name: myName });
+        const frame = { __t: H.JOIN, name: myName };
+        if (resumeToken) frame.resume = resumeToken;
+        const ok = await publish(frame);
         // A JOIN that never left the building is the one failure the player must
         // not be left guessing about: the host simply never heard them.
         if (!ok && joinTries >= JOIN_MAX_TRIES && !verdict) {

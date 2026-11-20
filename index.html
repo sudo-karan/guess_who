@@ -140,6 +140,9 @@
       <div class="setup-hint" id="setup-hint">
         Tap characters to add them to your board. <b><span id="pick-count">0</span>/20</b> chosen.
       </div>
+      <!-- Online only: so you know whether your opponent is still choosing or
+           already waiting on you. -->
+      <p id="setup-opp" class="setup-opp hidden" role="status" aria-live="polite"></p>
       <div id="setup-grid" class="grid setup-grid"></div>
       <div class="setup-footer">
         <button class="btn ghost" id="setup-clear">Clear</button>
@@ -280,6 +283,16 @@
 
   <div id="toast" class="toast hidden"></div>
   <div id="tooltip" class="tooltip hidden"></div>
+
+  <!-- Touch devices get this instead of the hover tooltip: press and hold a card
+       to open it, and it stays put until you close it. A plain tap is left alone
+       so it can still pick or cross off a card. -->
+  <div id="card-detail" class="card-detail hidden" role="dialog" aria-modal="true" aria-label="Character details">
+    <div class="cd-panel">
+      <button class="cd-close" id="cd-close" type="button" aria-label="Close">✕</button>
+      <div id="cd-body"></div>
+    </div>
+  </div>
 
   <!-- Robot "thinking…" indicator (solo mode) -->
   <div id="robot-thinking" class="robot-thinking hidden"><span class="rt-emoji">🤖</span> Robot is thinking…</div>

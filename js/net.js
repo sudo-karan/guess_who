@@ -18,6 +18,13 @@ const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
 export const ID_PREFIX = 'guesswho-v1-';
 const TURN_KEY = 'gw-turn';        // optional user-supplied TURN server
 
+export function randomToken(n = 16) {
+  let s = '';
+  const a = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  for (let i = 0; i < n; i++) s += a[Math.floor(Math.random() * a.length)];
+  return s;
+}
+
 export function randomCode(len = 4) {
   let s = '';
   for (let i = 0; i < len; i++) {
@@ -124,7 +131,14 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
   let opened = false;       // has the match connection been approved + opened
   let done = false;         // a terminal error has already been reported
   let myName = '';
-  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null, unreachable: null, healthy: null };
+  const cbs = {
+    data: null, open: null, error: null, status: null, joinRequest: null,
+    unreachable: null, healthy: null, resumed: null, token: null,
+  };
+  // Identifies this match to the player who is in it, so that one of them
+  // refreshing is a reconnection rather than a stranger knocking.
+  let sessionToken = null;
+  let resumeToken = null;    // guest side: the token we were given, to come back with
   const cleaners = new Set();   // per-connection timer teardown, run on close()
   // What we know about this attempt, for the "Connection details" readout.
   const diag = { role: null, code: null, peerId: null, broker: 'connecting', ice: null, candidates: [], note: null };
@@ -201,7 +215,8 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         // every future guest hit "room full").
         if (c.open === false) { status('The player left before you answered.'); return; }
         conn = c; opened = true;
-        try { c.send({ __t: H.ACCEPT }); } catch (_) {}
+        if (!sessionToken) sessionToken = randomToken();
+        try { c.send({ __t: H.ACCEPT, token: sessionToken }); } catch (_) {}
         status('Connected!');
         cbs.open && cbs.open();
       };
@@ -240,6 +255,19 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
       if (d && d.__t === H.JOIN) {
         clearTimeout(idle);
         clearTimeout(fallback);
+        // The same player coming back after a refresh, holding the token we gave
+        // them when we first let them in. Put them straight back into the game
+        // they were already playing: asking the host to approve their own
+        // opponent again, mid-match, would be nonsense.
+        if (sessionToken && d.resume === sessionToken) {
+          settled = true; prompted = true;
+          stop();
+          conn = c; opened = true;
+          try { c.send({ __t: H.ACCEPT, token: sessionToken, resumed: true }); } catch (_) {}
+          status('Opponent reconnected.');
+          cbs.resumed && cbs.resumed();
+          return;
+        }
         // Already in a game: reject a DIFFERENT second guest as full, but ignore a
         // duplicate join on the already-accepted connection (never kill the live game).
         if (opened) { if (c !== conn) { try { c.send({ __t: H.FULL }); } catch (_) {} softClose(c); } return; }
@@ -270,7 +298,12 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
     let joinTimer = null, giveUp = null, openTimer = null;
     const stopTimers = () => { clearInterval(joinTimer); clearTimeout(giveUp); clearTimeout(openTimer); };
     cleaners.add(stopTimers);
-    const sendJoin = () => { if (c.open !== false) { try { c.send({ __t: H.JOIN, name: myName }); } catch (_) {} } };
+    const sendJoin = () => {
+      if (c.open === false) return;
+      const frame = { __t: H.JOIN, name: myName };
+      if (resumeToken) frame.resume = resumeToken;
+      try { c.send(frame); } catch (_) {}
+    };
     watchIce(c);
 
     // The data channel never opening is the signature of a network that can't do
@@ -302,7 +335,14 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
       if (d && d.__t === H.ACCEPT) {
         verdict = true; stopTimers();
         if (done) return;          // a late yes to an attempt we already gave up on
-        opened = true; status('Connected!');
+        if (d.token) { sessionToken = d.token; cbs.token && cbs.token(d.token); }
+        opened = true;
+        if (d.resumed) {           // we are back in the game we were already playing
+          status('Reconnected.');
+          cbs.resumed && cbs.resumed();
+          return;
+        }
+        status('Connected!');
         cbs.open && cbs.open();
         // Flush anything (e.g. the roster) that raced ahead of the accept so it is
         // never silently dropped — this is the guest's ONLY setup-entry trigger.
@@ -389,6 +429,13 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
     onUnreachable(fn) { cbs.unreachable = fn; },
     // Called when a reported problem has cleared and the transport is working.
     onHealthy(fn) { cbs.healthy = fn; },
+    // Called instead of onOpen when this is the same match picked back up after
+    // one side refreshed, so the caller restores rather than starting over.
+    onResumed(fn) { cbs.resumed = fn; },
+    // The guest is handed a token when it is let in; it presents that token to
+    // get straight back in later. Both sides keep it so either can refresh.
+    onToken(fn) { cbs.token = fn; },
+    useSessionToken(t) { if (t) { sessionToken = t; resumeToken = t; } },
 
     // What happened, in the player's own words — shown behind "Connection details".
     diagnostics() {
@@ -455,7 +502,8 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
     },
 
     // Join a room by code. `name` is sent with the join request.
-    join(code, name) {
+    join(code, name, resume) {
+      if (resume) resumeToken = resume;
       if (!makePeer && !peerAvailable()) { fail('unsupported', 'Online play needs an internet connection.'); return; }
       myName = String(name || '').slice(0, 14);
       const clean = String(code || '').trim().toUpperCase();
