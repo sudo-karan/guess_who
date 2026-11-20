@@ -501,14 +501,30 @@ body {
 .setup-opp.hidden { display: none; }
 .setup-opp.waiting { background: #fff6e0; color: #8a6400; border-color: #f2dca0; }
 
+/* A game we gave up on but have not forgotten: offer it back explicitly. */
+.resume-row {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  justify-content: space-between; margin-bottom: 14px;
+  padding: 10px 14px; border-radius: 12px;
+  background: #fff6e0; border: 1px solid #f2dca0; color: #7a5600;
+  font-weight: 600; font-size: 0.9rem; text-align: left;
+}
+.resume-row.hidden { display: none; }
+.resume-btns { display: flex; gap: 8px; }
+
 /* ------------------ card details, press and hold (touch) ------------- */
 .card-detail {
   position: fixed; inset: 0; z-index: 80;
+  width: 100%; max-width: none; height: 100%; max-height: none;
+  margin: 0; border: 0; color: inherit;
   display: flex; align-items: center; justify-content: center;
   padding: 20px; background: rgba(30, 20, 60, 0.55);
   animation: fade 0.12s ease;
 }
-.card-detail.hidden { display: none; }
+/* A dialog is laid out only while open, and ours is a flex container. */
+.card-detail:not([open]) { display: none; }
+/* The element itself is the dim layer, so the real backdrop stays out of it. */
+.card-detail::backdrop { background: transparent; }
 .cd-panel {
   position: relative; width: min(320px, 100%); min-width: 0; max-width: 100%;
   background: var(--ink); color: #fff; border-radius: 16px;
@@ -535,7 +551,9 @@ body {
 /* --------------------------- responsive ----------------------------- */
 /* Four full-width buttons stop fitting long before phone widths. */
 @media (max-width: 900px) {
-  .controls .btn { min-width: 0; flex: 1 1 auto; }
+  /* The cap matters: between 621 and 661px the last button wraps onto a row of
+     its own, and without it grows to the full width of the bar. */
+  .controls .btn { min-width: 0; flex: 1 1 auto; max-width: calc(50% - 6px); }
 }
 
 /* Fingers need bigger targets than a mouse pointer does. */
@@ -575,7 +593,9 @@ body {
      touch-sized chips made it worse. One column, free to shrink. */
   .filter-panel { flex-direction: column; gap: 10px; }
   .filter-sec { min-width: 0; }
-  .filters, .side, .side-block, .board-wrap { min-width: 0; }
+  /* NOT .side-block: its 240px floor is what puts the activity log and chat on
+     their own row. Letting it shrink squeezed the chat input down to 31px. */
+  .filters, .side, .board-wrap, .filter-block { min-width: 0; }
   .bar { flex-direction: column; align-items: flex-start; }
   .char .cname { font-size: 0.7rem; }
   .controls .btn { min-width: 0; flex: 1 1 calc(50% - 12px); padding-left: 8px; padding-right: 8px; }

@@ -31,12 +31,15 @@ pictures, and the trait those cards had in common.
 
 **On a phone or tablet**, tap a card to pick or cross it off as usual, and press
 and hold it to read its traits. The panel that opens stays until you close it,
-which is easier than trying to hover on a touchscreen.
+which is easier than trying to hover on a touchscreen. Close it with the ✕, by
+tapping the dimmed area, or with Escape. A stray second finger will not cancel a
+hold that is already under way, and holding a card never also crosses it off.
 
 **Refreshing is safe.** If you reload the page, close the tab by accident, or
 your phone reloads it for you, the game comes back: your board, your secret,
 what you had crossed off and the log are all restored, and you rejoin the same
-room without the host having to approve you again. Your opponent sees a short
+room without the host having to approve you again. That works whichever of you
+reloads, the host included. Your opponent sees a short
 "reconnecting" notice rather than being told you left. It gives up after about a
 minute, so someone who really has gone is still noticed. Going back to the menu
 on purpose ends the game properly, as you would expect.
@@ -142,6 +145,14 @@ service at all, run your own ntfy instance and point the game at it by setting
 `window.__GW_RELAY_BASE` before `js/app.js` loads. That also sidesteps the rate
 limits below.
 
+That cuts both ways for the rejoin token described further down. The host has to
+hand it over on the same public topic, so on the relay it is readable, and it
+cannot be treated as proof of who you are. The host therefore refuses to let a
+token displace an opponent who is still sending moves: a valid token gets you
+back into a room your opponent has left, not one they are still playing in. On a
+direct connection the token never leaves the encrypted channel, and there the
+host can check exactly whether the other player is still connected.
+
 **Rate limits.** ntfy.sh allows roughly 60 requests per 5 minutes and 250
 published messages per day **per IP address**, and two players behind the same
 router share that budget. The game is built to stay well inside it: rooms are
@@ -159,22 +170,50 @@ by code never needs the list at all.
 engine's messages hand control from one player to the other, so losing one would
 leave both players waiting forever. `js/reliable.js` numbers every message, has
 the receiver confirm what it has, and resends anything unconfirmed. In the normal
-case confirmations ride along on the reply and cost nothing extra.
+case confirmations ride along on the reply and cost nothing extra. A message that
+never turns up is asked for once per interval rather than once per later arrival,
+and if it is clearly not coming the player is told instead of the request quietly
+repeating forever.
 
 **Coming back after a reload.** `js/session.js` keeps your own side of the game
-in `sessionStorage`, which is per tab and goes when the tab does. When the host
-first lets a player in it issues a token; the player presents that token to get
-straight back in, so a refresh is a reconnection rather than a stranger
-knocking, and the host is not asked to approve their own opponent twice. A host
+in `sessionStorage`, which is per tab and goes when the tab does. Saved with it:
+the cast, so the board is not empty when you come back; and anything you sent
+that your opponent had not confirmed yet, because the outbox holding those
+messages dies with the page and nobody else can resend them.
+
+When the host first lets a player in it issues a token, and keeps a copy. The
+player presents that token to get straight back in, so a refresh is a
+reconnection rather than a stranger knocking, and the host is not asked to
+approve its own opponent twice. The host keeping a copy is what makes a *host*
+refresh work too: without it a returning host cannot recognise the opponent it
+was already playing, and would deal a fresh cast over a game in progress. A host
 coming back re-opens the same room code, waiting out the broker's old
-registration if it has to. Both sides start their message numbering again on a
-resume, since the side that refreshed lost its counters, and anything that was
-never confirmed goes back on the wire.
+registration if it has to, and opens the relay on that code straight away so the
+room is reachable while it waits.
+
+Each return attempt carries a number one higher than the last. A returning player
+re-sends its request every few seconds until it hears back, and the host answers
+every time but acts only on a number it has not seen, since acting twice would
+restart the message numbering mid-stream and wedge it.
+
+Both sides start their numbering again on a resume, since the side that refreshed
+lost its counters, and anything unconfirmed goes back on the wire. The engine
+ignores a hand-over, a setup or a start-of-play it has already applied, so a
+needless repeat costs nothing instead of wiping the cards you had crossed off.
+
+If the direct connection drops mid-game, the host puts its relay subscription
+back up on the same code. An opponent who reconnects on a network with no
+peer-to-peer route can then still find the room, which is what happens when a
+phone comes back on mobile data.
 
 Both players refreshing at the same moment does recover: each restores its own
 side and the guest knocks again until the host is back. It can take a few
 seconds longer, because the broker may still be holding the host's old
 registration and it has to wait that out before re-opening the same code.
+
+If the game does give up and tell you the connection is lost, reloading lands you
+on the front page with that room offered back behind a **Rejoin** button, rather
+than silently dialling a room that is probably gone.
 
 What is not covered: a browser set to clear site data on close has nothing to
 come back to, and Pass & Play and the robot still start over on a reload, since

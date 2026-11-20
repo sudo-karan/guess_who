@@ -45,7 +45,11 @@ export function createReliableChannel(inner, {
   const early = new Map();    // seq -> frame, arrived before its turn
   let ackTimer = null, resendTimer = null;
   let troubled = false;
-  const cbs = { data: null, open: null, error: null, status: null, joinRequest: null, healthy: null, resumed: null };
+  let gapTimer = null, needTries = 0;   // asking for a message that has not arrived
+  const cbs = {
+    data: null, open: null, error: null, status: null, joinRequest: null,
+    healthy: null, resumed: null, pending: null,
+  };
 
   const timer = (fn, ms) => {
     const t = setInterval(fn, ms);
@@ -69,6 +73,17 @@ export function createReliableChannel(inner, {
     outbox.set(outSeq, { frame, sentAt: now(), tries: 0 });
     put(frame);
     startResending();
+    cbs.pending && cbs.pending();
+  }
+
+  // What we have sent and not had confirmed, as the app gave it to us. The app
+  // stores this with the rest of a saved game: these are the messages that were
+  // in flight when the page went, and the outbox they lived in went with it.
+  function pendingFrames() {
+    return [...outbox].sort((a, b) => a[0] - b[0]).map(([, it]) => {
+      const { [SEQ]: _s, [ACK]: _a, ...msg } = it.frame;
+      return msg;
+    });
   }
 
   function startResending() {
@@ -104,9 +119,44 @@ export function createReliableChannel(inner, {
   function resendFrom(seq) {
     for (const [n, item] of [...outbox].sort((a, b) => a[0] - b[0])) {
       if (n < seq) continue;
+      if (item.tries >= maxResends) continue;   // counts, so a hopeless gap surfaces
+      item.tries++;
       item.sentAt = now();
       put(item.frame);
     }
+    startResending();
+  }
+
+  // Asking for a message that is missing, on a clock of its own rather than once
+  // per out-of-order arrival. Two reasons: a frame lost for good otherwise turned
+  // every later arrival into another request, a storm that never ended and spent
+  // the relay's shared quota on nothing; and if the other side then went quiet,
+  // nothing asked again at all and the player was never told. So: one request per
+  // interval while the gap is open, say so once it is clearly not coming, and
+  // eventually stop rather than ask forever.
+  function openGap() {
+    if (gapTimer) return;
+    needTries = 0;
+    askGap();
+    gapTimer = timer(askGap, resendMs);
+  }
+
+  function closeGap() {
+    clearInterval(gapTimer); gapTimer = null; needTries = 0;
+  }
+
+  function askGap() {
+    if (!early.size) { closeGap(); return; }
+    if (needTries >= maxResends * 4) { clearInterval(gapTimer); gapTimer = null; return; }
+    needTries++;
+    if (needTries === maxResends + 1 && !troubled) {
+      troubled = true;
+      cbs.error && cbs.error({
+        type: 'unsent',
+        message: 'A move from your opponent went missing. Still trying.',
+      });
+    }
+    put({ [NEED]: want });
   }
 
   function confirm(upTo) {
@@ -114,6 +164,7 @@ export function createReliableChannel(inner, {
     confirmed = upTo;
     for (const n of [...outbox.keys()]) if (n <= upTo) outbox.delete(n);
     if (!outbox.size && troubled) { troubled = false; cbs.healthy && cbs.healthy(); }
+    cbs.pending && cbs.pending();
   }
 
   /* ----------------------------- receiving ----------------------------- */
@@ -139,7 +190,7 @@ export function createReliableChannel(inner, {
     if (seq < want) return;                       // already had it
     if (seq > want) {                             // something is missing
       early.set(seq, frame);
-      put({ [NEED]: want });
+      openGap();
       return;
     }
 
@@ -150,6 +201,8 @@ export function createReliableChannel(inner, {
       cbs.data && cbs.data(strip(held));
       want++;
     }
+    closeGap();
+    if (!early.size && !outbox.size && troubled) { troubled = false; cbs.healthy && cbs.healthy(); }
     scheduleAck();
   }
 
@@ -173,14 +226,12 @@ export function createReliableChannel(inner, {
   function reset() {
     clearInterval(resendTimer); resendTimer = null;
     clearTimeout(ackTimer); ackTimer = null;
-    const unsent = [...outbox].sort((a, b) => a[0] - b[0]).map(([, it]) => it.frame);
+    const unsent = pendingFrames();
     outSeq = 0; want = 1; confirmed = 0; acked = 0;
     outbox.clear(); early.clear();
     troubled = false;
-    for (const frame of unsent) {
-      const { [SEQ]: _s, [ACK]: _a, ...msg } = frame;
-      sendApp(msg);
-    }
+    closeGap();
+    for (const msg of unsent) sendApp(msg);
   }
 
   /* -------------------------------- api -------------------------------- */
@@ -207,11 +258,26 @@ export function createReliableChannel(inner, {
       if (inner.onResumed) inner.onResumed(() => { reset(); fn && fn(); });
     },
     onToken(fn) { if (inner.onToken) inner.onToken(fn); },
+
+    // Called whenever the set of unconfirmed messages changes, so a saved game
+    // can keep an up-to-date copy of it.
+    onPending(fn) { cbs.pending = fn; },
+    pending() { return pendingFrames(); },
+
+    // Put back what a page that went away had in flight. Resending is normally
+    // the sender's job, but a tab that reloads takes its outbox with it, so the
+    // one thing the machinery here cannot recover from is its own side vanishing.
+    // Those frames have to come back from the saved game instead. Repeats are
+    // safe: the engine ignores a hand-over it has already applied.
+    requeue(msgs) {
+      if (!Array.isArray(msgs)) return;
+      for (const m of msgs) if (m && typeof m === 'object') sendApp(m);
+    },
     sessionToken() { return inner.sessionToken ? inner.sessionToken() : null; },
     useSessionToken(t) { if (inner.useSessionToken) inner.useSessionToken(t); },
 
     host(onCode, code) { inner.host(onCode, code); },
-    join(code, name, resume) { inner.join(code, name, resume); },
+    join(code, name, resume, epoch) { inner.join(code, name, resume, epoch); },
     send(msg) { sendApp(msg); },
     isOpen() { return inner.isOpen(); },
     mode() { return inner.mode ? inner.mode() : 'direct'; },
@@ -230,6 +296,7 @@ export function createReliableChannel(inner, {
     close() {
       clearInterval(resendTimer); resendTimer = null;
       clearTimeout(ackTimer); ackTimer = null;
+      closeGap();
       outbox.clear(); early.clear();
       inner.close();
     },
