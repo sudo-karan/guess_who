@@ -349,6 +349,11 @@ export function createEngine({ isHost, myName, now }) {
     if (!msg || typeof msg !== 'object') return;
     switch (msg.type) {
       case 'setup': {
+        // A resumed connection re-sends anything it never saw confirmed, so the
+        // same setup can legitimately arrive again in the middle of a game.
+        // Applying it twice wipes every card this player has crossed off and
+        // stands all twenty back up. It only ever means anything before play.
+        if (state.phase === 'play' || state.phase === 'over') break;
         state.oppName = msg.name || (isHost ? 'Player 2' : 'Player 1');
         state.oppBoard = Array.isArray(msg.board) ? msg.board.slice(0, BOARD_SIZE) : [];
         state.oppReady = true;
@@ -359,7 +364,10 @@ export function createEngine({ isHost, myName, now }) {
         break;
       }
       case 'begin': {
-        if (!isHost) startPlay(msg.first);
+        // Same reasoning. Starting play again mid-game would put the turn counter
+        // back to 1 and hand the turn to whoever went first, which leaves both
+        // players waiting on each other.
+        if (!isHost && state.phase !== 'play' && state.phase !== 'over') startPlay(msg.first);
         break;
       }
       case 'endTurn': {

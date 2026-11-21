@@ -17,6 +17,11 @@ let CHAR_BY_ID = {};
 function setRoster(arr) {
   ROSTER = arr || [];
   CHAR_BY_ID = Object.fromEntries(ROSTER.map((c) => [c.id, c]));
+  // The cast is part of a saved game, and this is the only moment it changes.
+  // Saving only on an engine change meant a reload during board building
+  // restored a game with no characters in it at all, which there is no way out
+  // of. Harmless in the other modes: the save no-ops unless a room is live.
+  saveSessionNow();
 }
 
 /* ------------------------------ helpers ----------------------------- */
@@ -26,6 +31,7 @@ const screens = {
   play: $('#screen-play'), over: $('#screen-over'),
 };
 function showScreen(name) {
+  closeCardDetail();
   Object.values(screens).forEach((s) => s.classList.remove('active'));
   screens[name].classList.add('active');
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -41,6 +47,7 @@ function toast(msg) {
 
 // Promise-based confirm modal.
 function confirmModal({ title, body, okText = 'Confirm', cancelText = 'Cancel' }) {
+  closeCardDetail();
   return new Promise((resolve) => {
     $('#modal-title').textContent = title;
     $('#modal-body').innerHTML = body;
@@ -60,6 +67,7 @@ function confirmModal({ title, body, okText = 'Confirm', cancelText = 'Cancel' }
 
 // Notice modal: a single OK button, for one-way alerts (e.g. "X is asking…").
 function noticeModal({ title, body, okText = 'OK' }) {
+  closeCardDetail();
   return new Promise((resolve) => {
     $('#modal-title').textContent = title;
     $('#modal-body').innerHTML = body;
@@ -104,6 +112,22 @@ function isTouch() {
 
 const LONG_PRESS_MS = 450;
 const LONG_PRESS_SLOP = 12;   // a finger that drifts this far is scrolling, not holding
+const BACKDROP_GRACE_MS = 300;
+
+// Which kind of pointer was used last. A Windows touchscreen laptop and an iPad
+// with a trackpad do both, and report `hover: hover` while still sending touch
+// events, so no media query can answer this. Each event says what it was.
+let lastPointer = 'mouse';
+
+// The card panel covers the whole screen, so anything else that takes the screen
+// over has to close it first. Left open, it sat on top of modals whose only
+// button was then impossible to reach, and floated over the next screen.
+function closeCardDetail() {
+  const p = $('#card-detail');
+  if (!p) return;
+  if (p.open) { try { p.close(); } catch (_) { p.removeAttribute('open'); } }
+  else p.removeAttribute('open');
+}
 
 // Two ways to see a character's traits, one per kind of device.
 //
@@ -117,11 +141,16 @@ function initTooltip() {
   const panel = $('#card-detail');
   const body = $('#cd-body');
 
-  if (isTouch()) document.body.classList.add('touch');
+  if (isTouch()) { document.body.classList.add('touch'); lastPointer = 'touch'; }
 
   /* ---------------------------- mouse ---------------------------- */
-  document.addEventListener('mousemove', (e) => {
-    if (isTouch()) return;                 // taps synthesise these; ignore them
+  // pointermove rather than mousemove, because it says whether this was a real
+  // mouse. A tap synthesises mouse events, and acting on those put a tooltip on
+  // screen with no pointer to move away from it, so it stayed there. Keying off
+  // the device instead cost hybrid machines the hover tooltip altogether.
+  document.addEventListener('pointermove', (e) => {
+    if (e.pointerType) lastPointer = e.pointerType;
+    if (e.pointerType !== 'mouse') { tip.classList.add('hidden'); return; }
     const el = e.target.closest(CARD_SEL);
     const ch = el && CHAR_BY_ID[Number(el.dataset.id)];
     if (!ch) { tip.classList.add('hidden'); return; }
@@ -137,30 +166,49 @@ function initTooltip() {
   }, { passive: true });
   document.addEventListener('mouseleave', () => tip.classList.add('hidden'));
 
+  // A real mouse coming back means the browser's own text selection and callout
+  // on cards are wanted again.
+  document.addEventListener('pointerdown', (e) => {
+    if (e.pointerType) lastPointer = e.pointerType;
+    if (e.pointerType === 'mouse') document.body.classList.remove('touch');
+  }, { passive: true });
+
   /* ------------------------ press and hold ----------------------- */
   let timer = null, startX = 0, startY = 0, swallowClick = false;
+  let pressId = null;      // the finger that started this press
+  let openedAt = 0;
 
-  const cancel = () => { clearTimeout(timer); timer = null; };
+  const endPress = () => { clearTimeout(timer); timer = null; pressId = null; };
+  const findTouch = (list, id) => {
+    for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return list[i];
+    return null;
+  };
 
   const open = (ch) => {
     body.innerHTML = tooltipHTML(ch);
-    panel.classList.remove('hidden');
-    const close = $('#cd-close');
-    if (close) close.focus();
+    openedAt = Date.now();
+    if (!panel.open) {
+      try { panel.showModal(); } catch (_) { panel.setAttribute('open', ''); }
+    }
+    const btn = $('#cd-close');
+    if (btn) btn.focus();
   };
 
-  const close = () => panel.classList.add('hidden');
-
   document.addEventListener('touchstart', (e) => {
-    const el = e.target.closest(CARD_SEL);
+    lastPointer = 'touch';
+    document.body.classList.add('touch');
+    if (timer) return;      // a hold is already running: a stray second finger is not its business
     // Starting a new touch always clears the last one's leftovers. Without this,
     // a long press that the browser does not follow with a click would leave the
     // flag set and swallow the player's next tap instead.
     swallowClick = false;
+    if (e.touches.length > 1) { endPress(); return; }
+    const t = e.changedTouches[0];
+    const el = t && t.target && t.target.closest ? t.target.closest(CARD_SEL) : null;
     const ch = el && CHAR_BY_ID[Number(el.dataset.id)];
-    if (!ch || e.touches.length !== 1) { cancel(); return; }
-    startX = e.touches[0].clientX; startY = e.touches[0].clientY;
-    cancel();
+    if (!ch) { endPress(); return; }
+    pressId = t.identifier;
+    startX = t.clientX; startY = t.clientY;
     timer = setTimeout(() => {
       timer = null;
       swallowClick = true;      // the tap that ends this hold must not also play the card
@@ -170,32 +218,57 @@ function initTooltip() {
   }, { passive: true });
 
   document.addEventListener('touchmove', (e) => {
-    if (!timer || !e.touches.length) return;
-    const dx = e.touches[0].clientX - startX, dy = e.touches[0].clientY - startY;
-    if (Math.hypot(dx, dy) > LONG_PRESS_SLOP) cancel();   // they are scrolling
+    if (!timer || pressId === null) return;
+    // Follow the finger that started the press, not whichever is first in the
+    // list. With one finger resting on a card while another pinches, the first
+    // one never moves, so the hold used to fire in the middle of a pinch-zoom.
+    const t = findTouch(e.touches, pressId);
+    if (!t || e.touches.length > 1) { endPress(); return; }
+    const dx = t.clientX - startX, dy = t.clientY - startY;
+    if (Math.hypot(dx, dy) > LONG_PRESS_SLOP) endPress();   // they are scrolling
   }, { passive: true });
 
-  document.addEventListener('touchend', cancel, { passive: true });
-  document.addEventListener('touchcancel', cancel, { passive: true });
+  // Non-passive on purpose. Once the hold has fired, this stops the browser
+  // synthesising a mouse sequence on release, which was blurring the panel's
+  // close button the instant it appeared and letting the same release count as a
+  // tap on the backdrop. A second finger lifting is not the end of the press.
+  document.addEventListener('touchend', (e) => {
+    if (swallowClick && e.cancelable) e.preventDefault();
+    if (pressId === null || findTouch(e.changedTouches, pressId)) endPress();
+    // The click we are guarding against, if the platform sends one at all,
+    // follows within a moment. Give up waiting for it rather than leaving the
+    // guard armed: a keyboard press on the focused close button also arrives as
+    // a click, and swallowing that left no way to shut the panel without a mouse.
+    if (swallowClick) setTimeout(() => { swallowClick = false; }, 400);
+  }, { passive: false });
+  document.addEventListener('touchcancel', endPress, { passive: true });
 
-  // Swallow the click the browser sends after a long press, so holding a card to
-  // read it never also crosses it off.
+  // Backstop for platforms that send the click anyway. Only over a card, which
+  // is the thing worth guarding: holding a card to read it must not also cross it
+  // off. Swallowing every click instead ate a deliberate tap on the close button
+  // in the moment after the release, which is exactly when it gets tapped.
   document.addEventListener('click', (e) => {
     if (!swallowClick) return;
+    if (!e.target.closest(CARD_SEL)) return;
     swallowClick = false;
-    if (e.target.closest(CARD_SEL)) { e.preventDefault(); e.stopPropagation(); }
+    e.preventDefault(); e.stopPropagation();
   }, true);
 
-  // Android pops its own menu on a long press; ours replaces it.
+  // Android pops its own menu on a long press; ours replaces it. Only for a
+  // finger: a right-click on a touchscreen laptop still deserves the real menu.
   document.addEventListener('contextmenu', (e) => {
-    if (isTouch() && e.target.closest(CARD_SEL)) e.preventDefault();
+    if (lastPointer !== 'mouse' && e.target.closest(CARD_SEL)) e.preventDefault();
   });
 
-  $('#cd-close').onclick = close;
-  panel.addEventListener('click', (e) => { if (e.target === panel) close(); });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !panel.classList.contains('hidden')) close();
+  $('#cd-close').onclick = closeCardDetail;
+  // Tapping the dim area closes it, but not with the very gesture that opened it.
+  panel.addEventListener('click', (e) => {
+    if (e.target !== panel) return;
+    if (Date.now() - openedAt < BACKDROP_GRACE_MS) return;
+    closeCardDetail();
   });
+  // Escape is the dialog's own job now; just keep the markup in step.
+  panel.addEventListener('close', () => { body.innerHTML = ''; });
 }
 
 /* --------------------------- game controller ------------------------ */
@@ -251,6 +324,21 @@ function initHome() {
   $('#btn-host').onclick = () => hostOnline();
   $('#btn-join').onclick = () => joinOnline();
   $('#join-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinOnline(); });
+
+  // A saved game we already gave up on: try that room again, or let it go.
+  $('#btn-resume').onclick = () => {
+    const saved = loadSession();
+    $('#resume-row').classList.add('hidden');
+    if (!saved) { setNetStatus('That game has expired. Create a new room instead.'); return; }
+    setNetStatus(saved.isHost ? 'Re-opening your room…' : 'Reconnecting…');
+    if (saved.isHost) hostOnline(saved);
+    else joinOnline(null, saved);
+  };
+  $('#btn-forget').onclick = () => {
+    forgetSession();
+    $('#resume-row').classList.add('hidden');
+    setNetStatus('');
+  };
 
   // Room browser: refresh + "request to join" a listed room.
   $('#btn-refresh-rooms').onclick = () => ensureLobby();
@@ -444,6 +532,8 @@ function endHostedRoom() {
 // never leave a second (stale, "unavailable") room behind or a dangling peer.
 function teardownOnline() {
   netRecovered();        // a pending countdown must not outlive the game that lit it
+  const offer = $('#resume-row');
+  if (offer) offer.classList.add('hidden');   // starting or leaving a game makes it moot
   endHostedRoom();
   if (G.channel) { try { G.channel.close(); } catch (_) {} G.channel = null; }
 }
@@ -495,6 +585,7 @@ function hostOnline(resume) {
   // Re-hosting must not leak a second room or leave the old game peer alive.
   teardownOnline();
   G.mode = 'online';
+  gaveUp = false;            // we are trying again; this game is live once more
   G.channel = createReliableChannel(createGameChannel());
   const engine = makeOnlineEngine(true, name);
   if (resume) {
@@ -504,16 +595,32 @@ function hostOnline(resume) {
   }
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
-  G.channel.onJoinRequest((who, ctl) => showJoinApproval(who, ctl));
+  G.channel.onJoinRequest((who, ctl) => {
+    // A restored host is already in a match. Its own opponent comes back holding
+    // a token and is recognised before ever reaching here, so anyone who does
+    // reach here is a stranger knocking on a game in progress. Approving them
+    // would deal a brand-new cast over both players' boards.
+    if (resume) {
+      ctl.deny();
+      setNetStatus(`${who} asked to join, but your game is already in progress.`);
+      return;
+    }
+    showJoinApproval(who, ctl);
+  });
   G.channel.onHealthy(netRecovered);
   G.channel.onToken((t) => { sessionToken = t; saveSessionNow(); });
+  G.channel.onPending(saveSessionNow);
+  let replayed = false;
   G.channel.onResumed(() => {
+    // Anything this tab had in flight when it reloaded, put back on the wire.
+    if (resume && !replayed) { replayed = true; G.channel.requeue(resume.pending); }
     stopRejoining();
     setNetStatus('Opponent reconnected.', 'ok');
     netRecovered();
     routeOnline(engine.state);        // back to whatever screen the game was on
   });
   G.channel.onOpen(() => {
+    if (resume) return;   // backstop: a restored room never deals a new cast
     setNetStatus('Opponent connected!', 'ok');
     noteTransport();
     if (lobby && hostedRoom) lobby.setStatus(hostedRoom, ROOM_STATUS.PLAYING);  // room now in-game
@@ -542,6 +649,8 @@ function hostOnline(resume) {
 // the token that proves we were already in it, and the engine's own state.
 let resumeCtx = null;       // { code, isHost, myName }
 let sessionToken = null;
+let gaveUp = false;         // we already told this player the connection was lost
+let resumeEpoch = 0;        // how many times we have come back to this game
 
 function saveSessionNow() {
   if (G.mode !== 'online' || !resumeCtx || !activeEngine) return;
@@ -552,6 +661,12 @@ function saveSessionNow() {
     isHost: resumeCtx.isHost,
     myName: resumeCtx.myName,
     token: sessionToken,
+    gaveUp,
+    epoch: resumeEpoch,
+    // Messages we sent that the opponent has not confirmed. If the page goes now,
+    // these are the ones nobody can resend, and a lost hand-over is a match that
+    // sits waiting forever on both sides.
+    pending: (G.channel && G.channel.pending) ? G.channel.pending() : [],
     roster: ROSTER,        // the cast itself: the guest is sent it, not told how to build it
     engine: activeEngine.snapshot(),
   });
@@ -559,8 +674,19 @@ function saveSessionNow() {
 
 function forgetSession() {
   stopRejoining();
-  resumeCtx = null; sessionToken = null;
+  resumeCtx = null; sessionToken = null; gaveUp = false; resumeEpoch = 0;
   clearSession();
+}
+
+// Remember that we have already shown this player a "connection lost" screen, so
+// a reload offers the room back instead of silently re-dialling it. Without this
+// the only way out of a dead room was the Home button: every reload walked
+// straight back in and spent another 45 seconds failing.
+function markGaveUp() {
+  if (G.mode !== 'online' || !resumeCtx || !activeEngine) return;
+  if (activeEngine.state.phase === 'over') return;
+  gaveUp = true;
+  saveSessionNow();
 }
 
 // On load, put the player back where they were. There is nothing to decide
@@ -569,6 +695,13 @@ function resumeSavedGame() {
   const saved = loadSession();
   if (!saved) return false;
   $('#online-panel').classList.remove('hidden');
+  // A game we already declared lost: offer it, don't re-enter it.
+  if (saved.gaveUp) {
+    $('#resume-text').textContent =
+      `Your game in room ${saved.code} lost its connection.`;
+    $('#resume-row').classList.remove('hidden');
+    return true;
+  }
   setNetStatus(saved.isHost
     ? 'Picking your game back up. Re-opening your room…'
     : 'Picking your game back up. Reconnecting…');
@@ -619,6 +752,7 @@ function joinOnline(codeArg, resume) {
   // tear it down so we don't strand a dead, still-advertised room.
   teardownOnline();
   G.mode = 'online';
+  gaveUp = false;            // we are trying again; this game is live once more
   G.channel = createReliableChannel(createGameChannel());
   const engine = makeOnlineEngine(false, name);
   if (resume) {
@@ -629,7 +763,10 @@ function joinOnline(codeArg, resume) {
   G.channel.onStatus((s) => setNetStatus(s));
   G.channel.onHealthy(netRecovered);
   G.channel.onToken((t) => { sessionToken = t; saveSessionNow(); });
+  G.channel.onPending(saveSessionNow);
+  let replayed = false;
   G.channel.onResumed(() => {
+    if (resume && !replayed) { replayed = true; G.channel.requeue(resume.pending); }
     clearTimeout(joinWaitHint);
     stopRejoining();
     setNetStatus('Reconnected.', 'ok');
@@ -643,9 +780,12 @@ function joinOnline(codeArg, resume) {
   });
   G.channel.onError(handleNetError);
   resumeCtx = { code, isHost: false, myName: name };
-  if (resume) sessionToken = resume.token;
+  // Each return attempt gets a number one higher than the last, so the host can
+  // tell a genuinely new one from a repeat of the one it already let back in.
+  if (resume) { sessionToken = resume.token; resumeEpoch = (resume.epoch || 0) + 1; }
+  else resumeEpoch = 0;
   saveSessionNow();
-  G.channel.join(code, name, resume && resume.token);
+  G.channel.join(code, name, resume && resume.token, resumeEpoch);
   // Waiting on a host who may never have heard us raises no error at all, so
   // surface the details panel once the wait stops looking normal.
   clearTimeout(joinWaitHint);
@@ -694,7 +834,11 @@ function handleNetError(e) {
   // forever (e.g. on "Awaiting result…"). Drive it to a terminal screen with a
   // way home instead — but ONLY when the game really is over.
   if (G.mode === 'online' && activeEngine && activeEngine.state.phase !== 'over') {
-    if (TERMINAL_NET_ERRORS.includes(e && e.type)) { showDisconnected(); return; }
+    // These five mean this room cannot be re-entered at all, so there is nothing
+    // worth keeping: a reload should land on the front page, not offer it back.
+    if (TERMINAL_NET_ERRORS.includes(e && e.type)) {
+      teardownOnline(); forgetSession(); showDisconnected(); return;
+    }
     if (e && e.type === 'closed' && resumeCtx) {
       softNetTrouble('Your opponent dropped out.');
       scheduleRejoin();
@@ -761,6 +905,7 @@ function netRecovered() {
 
 function showDisconnected(emoji, title, sub) {
   netRecovered();                        // stop any pending escalation
+  markGaveUp();                          // a reload must not walk straight back in
   endHostedRoom();                       // room can't continue — drop it from the lobby
   $('#over-emoji').textContent = emoji || '🔌';
   $('#over-title').textContent = title || 'Opponent left';
@@ -1332,6 +1477,7 @@ function initPlayControls() {
 /* --------------------- "it's your turn" popup (online) -------------- */
 let turnPopupTimer = null;
 function showTurnPopup() {
+  closeCardDetail();
   const el = $('#turn-popup');
   el.classList.remove('hidden');
   clearTimeout(turnPopupTimer);
@@ -1365,6 +1511,7 @@ function openQuestionBuilder() {
   if (s.turn !== 'me' || s.pendingGuess || s.asked || s.guessing) return;
   qbTrait = null; qbValues = new Set();
   renderQBuilder();
+  closeCardDetail();
   $('#qbuilder').classList.remove('hidden');
 }
 
@@ -1389,6 +1536,7 @@ function renderQBuilder() {
 // enforced: clicking the untruthful button warns instead of recording.
 function showAnswerUI(engine, question) {
   if (!question) return;
+  closeCardDetail();      // this overlay has no escape hatch: it must not be covered
   const rows = $('#qa-rows');
   $('#qa-title').textContent = `🙋 ${engine.state.oppName || 'Your rival'} asks:`;
   rows.innerHTML = `<div class="qa-row">

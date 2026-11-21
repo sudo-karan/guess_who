@@ -139,6 +139,23 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
   // refreshing is a reconnection rather than a stranger knocking.
   let sessionToken = null;
   let resumeToken = null;    // guest side: the token we were given, to come back with
+  let resumeEpoch = 0;       // guest side: which return attempt this is
+  let appliedEpoch = 0;      // host: the highest resume we have acted on
+  let resumedConn = null;    // ...and over which connection, for a guest sending no epoch
+
+  // See the long note in relay.js: acting on the same return twice restarts the
+  // delivery layer's numbering a second time and wedges the stream. A guest
+  // re-sends its JOIN every few seconds until it hears back, so this happens.
+  function newResume(d, c) {
+    if (Number.isFinite(d.epoch)) {
+      if (d.epoch <= appliedEpoch) return false;
+      appliedEpoch = d.epoch;
+      return true;
+    }
+    if (resumedConn === c) return false;
+    resumedConn = c;
+    return true;
+  }
   const cleaners = new Set();   // per-connection timer teardown, run on close()
   // What we know about this attempt, for the "Connection details" readout.
   const diag = { role: null, code: null, peerId: null, broker: 'connecting', ice: null, candidates: [], note: null };
@@ -215,7 +232,13 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         // every future guest hit "room full").
         if (c.open === false) { status('The player left before you answered.'); return; }
         conn = c; opened = true;
-        if (!sessionToken) sessionToken = randomToken();
+        if (!sessionToken) {
+          sessionToken = randomToken();
+          // The host has to remember this as well, not just hand it over. Without
+          // it a host that refreshes cannot recognise its own opponent coming
+          // back, and deals a whole new cast over a game already in progress.
+          cbs.token && cbs.token(sessionToken);
+        }
         try { c.send({ __t: H.ACCEPT, token: sessionToken }); } catch (_) {}
         status('Connected!');
         cbs.open && cbs.open();
@@ -260,10 +283,16 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         // they were already playing: asking the host to approve their own
         // opponent again, mid-match, would be nonsense.
         if (sessionToken && d.resume === sessionToken) {
+          // Unlike the relay, a data channel has a real close event, so whether
+          // the player we are already playing is still here has an exact answer.
+          // A token holder must not be able to push aside one who is: a token
+          // that leaked from a relayed game works against this transport too.
+          if (opened && c !== conn && conn && conn.open === true) return;
           settled = true; prompted = true;
           stop();
           conn = c; opened = true;
           try { c.send({ __t: H.ACCEPT, token: sessionToken, resumed: true }); } catch (_) {}
+          if (!newResume(d, c)) return;
           status('Opponent reconnected.');
           cbs.resumed && cbs.resumed();
           return;
@@ -302,6 +331,7 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
       if (c.open === false) return;
       const frame = { __t: H.JOIN, name: myName };
       if (resumeToken) frame.resume = resumeToken;
+      if (resumeToken && resumeEpoch) frame.epoch = resumeEpoch;
       try { c.send(frame); } catch (_) {}
     };
     watchIce(c);
@@ -502,8 +532,9 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
     },
 
     // Join a room by code. `name` is sent with the join request.
-    join(code, name, resume) {
+    join(code, name, resume, epoch) {
       if (resume) resumeToken = resume;
+      if (Number.isFinite(epoch)) resumeEpoch = epoch;
       if (!makePeer && !peerAvailable()) { fail('unsupported', 'Online play needs an internet connection.'); return; }
       myName = String(name || '').slice(0, 14);
       const clean = String(code || '').trim().toUpperCase();
