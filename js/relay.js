@@ -308,8 +308,13 @@ export function createRelayChannel({ base, fetchImpl, EventSourceImpl, joinRetry
         // is still talking: that is a takeover, not a refresh. Silence rather than
         // FULL on purpose, since FULL is terminal on the guest and would kill the
         // retries a real refresh depends on.
+        // One retry interval, not the two the prompted-requester rule uses. A
+        // returning player only gets four tries before it gives up and tells
+        // them the room did not answer, and a window that outlasts most of those
+        // tries turns a refresh into a lost game. See net.js for the same
+        // reasoning on the other transport.
         if (tokenOk && opened && from !== peerSid
-            && Date.now() - lastPeerAt < joinRetryMs * 2) return;
+            && Date.now() - lastPeerAt < joinRetryMs) return;
         // Same player returning after a refresh, with the token we issued when we
         // first let them in. Straight back into the match, no second approval.
         if (tokenOk) {
