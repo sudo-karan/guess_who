@@ -169,6 +169,84 @@ test('host: re-opening a room whose code is held gets the room onto the relay an
   ch.close();
 });
 
+test('resume: a returning player is let back in when the host has not noticed the old link died', async () => {
+  // A tab that goes away does not always close its data channel. A phone that
+  // backgrounds or reloads one often sends no close at all, so the host's flag
+  // for that connection stays true for as long as the host's own page lives.
+  // Refusing a token-bearing return on the strength of that flag refused the
+  // real player every time, silently, until the game gave up and told them the
+  // connection was lost. The test deliberately never closes the first guest.
+  const broker = createFakeBroker();
+  const host = createOnlineChannel({ makePeer: broker.makePeer, peerQuietMs: 150 });
+  let code = null, token = null, prompts = 0, resumedHost = false;
+  host.onJoinRequest((who, ctl) => { prompts++; ctl.accept(); });
+  host.onResumed(() => { resumedHost = true; });
+  host.host((c) => { code = c; });
+  await until(() => code !== null);
+
+  const g1 = createOnlineChannel({ makePeer: broker.makePeer });
+  g1.onToken((t) => { token = t; });
+  g1.join(code, 'Bo');
+  await until(() => token !== null);
+  assert.equal(prompts, 1);
+
+  const g2 = createOnlineChannel({ makePeer: broker.makePeer });
+  let resumedGuest = false;
+  const errs = [];
+  g2.onResumed(() => { resumedGuest = true; });
+  g2.onError((e) => errs.push(e.type));
+  g2.join(code, 'Bo', token, 1);
+
+  await until(() => resumedGuest && resumedHost, 10000);
+  assert.ok(resumedGuest, 'the returning player gets back in');
+  assert.ok(resumedHost, 'and the host knows who they are');
+  assert.equal(prompts, 1, 'without being asked to approve them again');
+  assert.deepEqual(errs, [], 'and without an error on the way');
+  host.close(); g1.close(); g2.close();
+});
+
+test('resume: a token cannot barge into a conversation in progress', async () => {
+  // The other half of the same rule: while the accepted player is actually
+  // sending moves, a second holder of the token is refused. Silently, because
+  // answering would kill the retries a real return depends on.
+  const broker = createFakeBroker();
+  const host = createOnlineChannel({ makePeer: broker.makePeer, peerQuietMs: 3000 });
+  let code = null, token = null, prompts = 0, resumedHost = false;
+  const got = [];
+  host.onJoinRequest((who, ctl) => { prompts++; ctl.accept(); });
+  host.onResumed(() => { resumedHost = true; });
+  host.onData((m) => got.push(m));
+  host.host((c) => { code = c; });
+  await until(() => code !== null);
+
+  const g1 = createOnlineChannel({ makePeer: broker.makePeer });
+  g1.onToken((t) => { token = t; });
+  g1.join(code, 'Bo');
+  await until(() => token !== null);
+
+  g1.send({ type: 'chat', text: 'still here' });
+  await until(() => got.length === 1);
+
+  const thief = createOnlineChannel({ makePeer: broker.makePeer });
+  let thiefResumed = false, thiefOpened = false;
+  thief.onResumed(() => { thiefResumed = true; });
+  thief.onOpen(() => { thiefOpened = true; });
+  thief.join(code, 'Zed', token, 9);
+
+  // Keep the real player talking, which is what holds the door shut.
+  for (let i = 0; i < 5; i++) {
+    await flush(300);
+    g1.send({ type: 'chat', text: 'turn ' + i });
+  }
+  await until(() => got.length >= 6, 3000);
+  assert.equal(resumedHost, false, 'the host does not hand the game over');
+  assert.equal(thiefResumed, false);
+  assert.equal(thiefOpened, false);
+  assert.equal(prompts, 1, 'and is not prompted either, which would be as bad');
+  assert.ok(got.length >= 6, 'the real player is still being heard');
+  host.close(); g1.close(); thief.close();
+});
+
 test('resume: when the direct link dies the host listens on the relay for the return', async () => {
   const direct = fakeTransport();
   const relays = [];

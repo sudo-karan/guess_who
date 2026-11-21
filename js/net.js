@@ -121,10 +121,13 @@ const friendly = (type) => FRIENDLY[type] || 'Connection problem. Please try aga
 const BROKER_MS = 12000;   // no answer from the signalling server -> offline?
 const CONNECT_MS = 9000;   // data channel never opened -> this network can't do P2P
 const VERDICT_MS = 60000;  // host never answered the join request
+const PEER_QUIET_MS = 3000; // silence this long and the accepted guest may be gone
 
 // Create an online channel. `makePeer` is injectable for tests; it defaults to
 // PeerJS in the browser. Returns an object with lifecycle callbacks.
-export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
+export function createOnlineChannel({
+  makePeer, connectMs = CONNECT_MS, peerQuietMs = PEER_QUIET_MS,
+} = {}) {
   const mkPeer = makePeer || defaultMakePeer;
   let peer = null;
   let conn = null;          // the ACTIVE (accepted) connection
@@ -142,6 +145,27 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
   let resumeEpoch = 0;       // guest side: which return attempt this is
   let appliedEpoch = 0;      // host: the highest resume we have acted on
   let resumedConn = null;    // ...and over which connection, for a guest sending no epoch
+  let lastPeerAt = 0;        // host: when the accepted guest was last heard from
+
+  // How long silence from the accepted guest still counts as them being there.
+  //
+  // This is the whole liveness test, and it has to be a clock rather than the
+  // connection's own open flag. A tab that goes away does not always close its
+  // data channel in any timely way: a phone that backgrounds or reloads one
+  // often never sends a close at all, and the flag then stays true for as long
+  // as the host's page lives. Keying off it refused the real player every single
+  // time they came back, silently, until the game gave up and told them the
+  // connection was lost. A clock cannot get stuck like that: once they are gone
+  // nothing refreshes it, so the door opens on its own.
+  //
+  // Kept shorter than a page reload takes (measured at about four seconds
+  // against the live site) so a returning player is not held at the door, while
+  // still refusing someone trying to barge into a conversation in progress.
+  // It is not much of a defence either way, and is not meant to be: see the note
+  // in relay.js about what a token can and cannot prove. On this transport the
+  // token never leaves the encrypted channel, so the only way to hold one is to
+  // have scraped it from a relayed game.
+  const peerQuiet = peerQuietMs;
 
   // See the long note in relay.js: acting on the same return twice restarts the
   // delivery layer's numbering a second time and wedges the stream. A guest
@@ -231,7 +255,7 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         // game to a dead connection (which would strand the host in setup and make
         // every future guest hit "room full").
         if (c.open === false) { status('The player left before you answered.'); return; }
-        conn = c; opened = true;
+        conn = c; opened = true; lastPeerAt = Date.now();
         if (!sessionToken) {
           sessionToken = randomToken();
           // The host has to remember this as well, not just hand it over. Without
@@ -283,14 +307,21 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         // they were already playing: asking the host to approve their own
         // opponent again, mid-match, would be nonsense.
         if (sessionToken && d.resume === sessionToken) {
-          // Unlike the relay, a data channel has a real close event, so whether
-          // the player we are already playing is still here has an exact answer.
-          // A token holder must not be able to push aside one who is: a token
-          // that leaked from a relayed game works against this transport too.
-          if (opened && c !== conn && conn && conn.open === true) return;
+          // A token holder must not push aside an opponent who is still playing:
+          // a token that leaked from a relayed game works against this transport
+          // too. But "still playing" means still talking, not merely holding a
+          // connection the browser has not got round to closing. See
+          // PEER_QUIET_MS above.
+          if (opened && c !== conn && conn && conn.open === true
+              && Date.now() - lastPeerAt < peerQuiet) return;
           settled = true; prompted = true;
           stop();
-          conn = c; opened = true;
+          const stale = (conn && conn !== c) ? conn : null;
+          conn = c; opened = true; lastPeerAt = Date.now();
+          // Drop the one we just replaced, so a zombie cannot sit there sending.
+          // Safe after the reassignment above: its close handler checks whether
+          // it is still the active connection, and it no longer is.
+          if (stale) softClose(stale);
           try { c.send({ __t: H.ACCEPT, token: sessionToken, resumed: true }); } catch (_) {}
           if (!newResume(d, c)) return;
           status('Opponent reconnected.');
@@ -303,7 +334,10 @@ export function createOnlineChannel({ makePeer, connectMs = CONNECT_MS } = {}) {
         askApproval(String(d.name || 'A player').slice(0, 14));
         return;
       }
-      if (c === conn && opened) cbs.data && cbs.data(d);   // game data only from the accepted guest
+      if (c === conn && opened) {
+        lastPeerAt = Date.now();          // proof they are still there
+        cbs.data && cbs.data(d);          // game data only from the accepted guest
+      }
     });
     c.on('close', () => {
       stop();
