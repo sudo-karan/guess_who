@@ -422,6 +422,12 @@ export function createEngine({ isHost, myName, now }) {
         break;
       }
       case 'guess': {
+        // A guess only means anything while a game is actually being played. A
+        // rematch is the one thing that moves the phase off 'over' while the
+        // end-of-game messages may still be unconfirmed, so without this a
+        // resume shortly after clicking Rematch replayed the LAST game's guess
+        // and dropped the receiver onto a result for a round nobody had played.
+        if (state.phase !== 'play') break;
         // Opponent guessed MY secret. My client is the source of truth.
         const correct = msg.id === state.mySecret;
         logEvent({ ts: msg.ts, turn: msg.turn, by: 'opp', kind: 'guess', cardId: msg.id, correct });
@@ -430,6 +436,10 @@ export function createEngine({ isHost, myName, now }) {
         break;
       }
       case 'guessResult': {
+        // Only ever an answer to a guess of mine that is still outstanding. That
+        // is the exact test, and a phase check would not do: a replayed result
+        // could land in a new round that is legitimately in 'play'.
+        if (!state.pendingGuess) break;
         // Reply to my own guess — reuse the ts I stamped on the outbound guess so
         // both clients log the SAME guess at the SAME time.
         logEvent({ ts: state.pendingGuessTs, turn: state.pendingGuessTurn, by: 'me', kind: 'guess', cardId: msg.id, correct: !!msg.correct });

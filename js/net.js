@@ -316,12 +316,16 @@ export function createOnlineChannel({
               && Date.now() - lastPeerAt < peerQuiet) return;
           settled = true; prompted = true;
           stop();
-          const stale = (conn && conn !== c) ? conn : null;
           conn = c; opened = true; lastPeerAt = Date.now();
-          // Drop the one we just replaced, so a zombie cannot sit there sending.
-          // Safe after the reassignment above: its close handler checks whether
-          // it is still the active connection, and it no longer is.
-          if (stale) softClose(stale);
+          // This transport is demonstrably usable again, so lift the latch that
+          // the earlier close set. Without this the SECOND drop reported nothing
+          // at all: no banner, no grace period, and no second chance to put the
+          // relay back up for an opponent who needs it to get home.
+          done = false;
+          // The connection we just replaced is deliberately left alone. Data is
+          // only accepted from the active one, so a stale one can do no harm,
+          // and closing it would turn a wrong guess by the liveness check above
+          // into a real disconnection for a player who was only thinking.
           try { c.send({ __t: H.ACCEPT, token: sessionToken, resumed: true }); } catch (_) {}
           if (!newResume(d, c)) return;
           status('Opponent reconnected.');

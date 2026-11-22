@@ -150,7 +150,13 @@ function initTooltip() {
   // the device instead cost hybrid machines the hover tooltip altogether.
   document.addEventListener('pointermove', (e) => {
     if (e.pointerType) lastPointer = e.pointerType;
-    if (e.pointerType !== 'mouse') { tip.classList.add('hidden'); return; }
+    // A pen hovers like a mouse and sends no touch events, so it gets the
+    // tooltip too. Without it a stylus-only machine has no way at all to read a
+    // card: no hover, and no press-and-hold to fall back on.
+    if (e.pointerType !== 'mouse' && e.pointerType !== 'pen') {
+      tip.classList.add('hidden');
+      return;
+    }
     const el = e.target.closest(CARD_SEL);
     const ch = el && CHAR_BY_ID[Number(el.dataset.id)];
     if (!ch) { tip.classList.add('hidden'); return; }
@@ -184,7 +190,17 @@ function initTooltip() {
     return null;
   };
 
+  // Anything already demanding an answer wins. Closing the panel when an overlay
+  // arrives only fixed one of the two orderings; a hold that starts while one is
+  // already up would still have covered it.
+  const overlayUp = () => ['#modal', '#qanswer', '#qbuilder']
+    .some((sel) => {
+      const el = $(sel);
+      return el && !el.classList.contains('hidden');
+    });
+
   const open = (ch) => {
+    if (overlayUp()) return;
     body.innerHTML = tooltipHTML(ch);
     openedAt = Date.now();
     if (!panel.open) {
@@ -232,16 +248,23 @@ function initTooltip() {
   // synthesising a mouse sequence on release, which was blurring the panel's
   // close button the instant it appeared and letting the same release count as a
   // tap on the backdrop. A second finger lifting is not the end of the press.
+  // The click we are guarding against, if the platform sends one at all, follows
+  // within a moment. Give up waiting for it rather than leaving the guard armed:
+  // a keyboard press on the focused close button also arrives as a click, and
+  // swallowing that left no way to shut the panel without a mouse.
+  const disarmSoon = () => {
+    if (swallowClick) setTimeout(() => { swallowClick = false; }, 400);
+  };
+
   document.addEventListener('touchend', (e) => {
     if (swallowClick && e.cancelable) e.preventDefault();
     if (pressId === null || findTouch(e.changedTouches, pressId)) endPress();
-    // The click we are guarding against, if the platform sends one at all,
-    // follows within a moment. Give up waiting for it rather than leaving the
-    // guard armed: a keyboard press on the focused close button also arrives as
-    // a click, and swallowing that left no way to shut the panel without a mouse.
-    if (swallowClick) setTimeout(() => { swallowClick = false; }, 400);
+    disarmSoon();
   }, { passive: false });
-  document.addEventListener('touchcancel', endPress, { passive: true });
+  // A gesture the browser takes over (a scroll it decides to own, an incoming
+  // call) ends in a cancel rather than an end. Disarm there too, or the guard
+  // stays up for the life of the page and eats the next tap on a card.
+  document.addEventListener('touchcancel', () => { endPress(); disarmSoon(); }, { passive: true });
 
   // Backstop for platforms that send the click anyway. Only over a card, which
   // is the thing worth guarding: holding a card to read it must not also cross it
@@ -267,7 +290,12 @@ function initTooltip() {
     if (Date.now() - openedAt < BACKDROP_GRACE_MS) return;
     closeCardDetail();
   });
-  // Escape is the dialog's own job now; just keep the markup in step.
+  // A modal dialog handles Escape itself. This is for the fallback path, where
+  // showModal was unavailable and the panel was opened by hand: there is no
+  // native Escape there, and without this it could only be closed by tapping.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.open) closeCardDetail();
+  });
   panel.addEventListener('close', () => { body.innerHTML = ''; });
 }
 
@@ -585,22 +613,42 @@ function hostOnline(resume) {
   // Re-hosting must not leak a second room or leave the old game peer alive.
   teardownOnline();
   G.mode = 'online';
-  gaveUp = false;            // we are trying again; this game is live once more
+  gaveUp = !!(resume && resume.gaveUp);   // keep it until we are genuinely back in
   G.channel = createReliableChannel(createGameChannel());
   const engine = makeOnlineEngine(true, name);
+  // Is there actually a match to protect? The cast is dealt the moment the first
+  // guest is let in, so having one is the test. A host that reloads while still
+  // waiting in the lobby has nothing to restore, and treating that as a match in
+  // progress stranded it on an empty board builder with a room that refused
+  // everyone who tried to join, for as long as the tab stayed open.
+  const inProgress = !!(resume && resume.roster && resume.roster.length);
   if (resume) {
+    // The token has to go back into this module too, not just into the channel:
+    // the transports only announce a token at the moment they mint one, so a
+    // restored host is never told it again. Without this every save after a
+    // refresh wrote token: null, and the SECOND refresh locked the opponent out.
+    sessionToken = resume.token;
+    resumeEpoch = resume.epoch || 0;
+    G.channel.useSessionToken(resume.token);
+  }
+  if (inProgress) {
     setRoster(resume.roster);
     engine.restore(resume.engine);
-    G.channel.useSessionToken(resume.token);
+    // Put back whatever was in flight when the page went, now, while the channel
+    // exists but has nowhere to send. It sits in the outbox, so it is in every
+    // save from here on, and goes out under fresh numbering once the opponent is
+    // back. Waiting for that moment meant the first attempt had already saved an
+    // empty list over it, and a second attempt had nothing left to replay.
+    G.channel.requeue(resume.pending);
   }
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
   G.channel.onJoinRequest((who, ctl) => {
-    // A restored host is already in a match. Its own opponent comes back holding
-    // a token and is recognised before ever reaching here, so anyone who does
-    // reach here is a stranger knocking on a game in progress. Approving them
-    // would deal a brand-new cast over both players' boards.
-    if (resume) {
+    // A restored match is already underway. Its own opponent comes back holding a
+    // token and is recognised before ever reaching here, so anyone who does reach
+    // here is a stranger knocking mid-game. Approving them would deal a
+    // brand-new cast over both players' boards.
+    if (inProgress) {
       ctl.deny();
       setNetStatus(`${who} asked to join, but your game is already in progress.`);
       return;
@@ -610,17 +658,16 @@ function hostOnline(resume) {
   G.channel.onHealthy(netRecovered);
   G.channel.onToken((t) => { sessionToken = t; saveSessionNow(); });
   G.channel.onPending(saveSessionNow);
-  let replayed = false;
   G.channel.onResumed(() => {
-    // Anything this tab had in flight when it reloaded, put back on the wire.
-    if (resume && !replayed) { replayed = true; G.channel.requeue(resume.pending); }
     stopRejoining();
+    gaveUp = false;           // they are back: this game is live again
     setNetStatus('Opponent reconnected.', 'ok');
     netRecovered();
+    saveSessionNow();
     routeOnline(engine.state);        // back to whatever screen the game was on
   });
   G.channel.onOpen(() => {
-    if (resume) return;   // backstop: a restored room never deals a new cast
+    if (inProgress) return;   // backstop: a restored match never deals a new cast
     setNetStatus('Opponent connected!', 'ok');
     noteTransport();
     if (lobby && hostedRoom) lobby.setStatus(hostedRoom, ROOM_STATUS.PLAYING);  // room now in-game
@@ -637,7 +684,7 @@ function hostOnline(resume) {
     hostedRoom = code;
     resumeCtx = { code, isHost: true, myName: name };
     saveSessionNow();
-    if (resume) { setNetStatus('Room re-opened. Waiting for your opponent to come back…'); return; }
+    if (inProgress) { setNetStatus('Room re-opened. Waiting for your opponent to come back…'); return; }
     // Advertise the room so friends can find it in the browser.
     ensureLobby();
     if (lobby) lobby.publish({ code, hostName: name, status: ROOM_STATUS.OPEN });
@@ -656,6 +703,9 @@ function saveSessionNow() {
   if (G.mode !== 'online' || !resumeCtx || !activeEngine) return;
   const st = activeEngine.state;
   if (st.phase === 'over') { clearSession(); return; }
+  // A room with no cast yet is still worth saving, so a reload keeps the code
+  // the other player may already have. What must not happen is RESTORING a game
+  // out of it: see `inProgress` in hostOnline and joinOnline.
   saveSession({
     code: resumeCtx.code,
     isHost: resumeCtx.isHost,
@@ -714,6 +764,12 @@ function resumeSavedGame() {
 // code and holds a token. The guest has to go back and knock again.
 let rejoinTimer = null, rejoinTries = 0;
 const REJOIN_TRIES = 5;
+// Longer than the direct transport takes to give up on a network it cannot
+// cross (9s), or every attempt is torn down three seconds before it would have
+// fallen back to the relay, and the automatic rejoin never asks the relay at
+// all. Five of these still fit inside the grace period with room to spare, and
+// the loop stops early the moment the opponent is back.
+const REJOIN_EVERY_MS = 12000;
 
 function scheduleRejoin() {
   if (rejoinTimer || !resumeCtx || resumeCtx.isHost) return;
@@ -731,7 +787,7 @@ function scheduleRejoin() {
     if (!saved) return;
     setNetStatus('Trying to get back into the game…');
     joinOnline(null, saved);
-    rejoinTimer = setTimeout(go, 6000);
+    rejoinTimer = setTimeout(go, REJOIN_EVERY_MS);
   };
   rejoinTimer = setTimeout(go, 2500);
 }
@@ -752,25 +808,33 @@ function joinOnline(codeArg, resume) {
   // tear it down so we don't strand a dead, still-advertised room.
   teardownOnline();
   G.mode = 'online';
-  gaveUp = false;            // we are trying again; this game is live once more
+  gaveUp = !!(resume && resume.gaveUp);   // keep it until we are genuinely back in
   G.channel = createReliableChannel(createGameChannel());
   const engine = makeOnlineEngine(false, name);
-  if (resume) {
+  // Same test as hostOnline: was there actually a game, or only a room? A saved
+  // session exists from the moment we knock, so a reload while still waiting to
+  // be let in would otherwise restore a board builder with no characters in it
+  // and no way forward. With no cast, just knock again on the same code.
+  const inProgress = !!(resume && resume.roster && resume.roster.length);
+  if (inProgress) {
     setRoster(resume.roster);
     engine.restore(resume.engine);
+    // See hostOnline: put the in-flight messages back now, not when the resume
+    // lands, or the next attempt reads back an empty list we wrote ourselves.
+    G.channel.requeue(resume.pending);
   }
   G.channel.onData((m) => onOnlineMessage(m, engine));
   G.channel.onStatus((s) => setNetStatus(s));
   G.channel.onHealthy(netRecovered);
   G.channel.onToken((t) => { sessionToken = t; saveSessionNow(); });
   G.channel.onPending(saveSessionNow);
-  let replayed = false;
   G.channel.onResumed(() => {
-    if (resume && !replayed) { replayed = true; G.channel.requeue(resume.pending); }
     clearTimeout(joinWaitHint);
     stopRejoining();
+    gaveUp = false;           // we are back in: this game is live again
     setNetStatus('Reconnected.', 'ok');
     netRecovered();
+    saveSessionNow();
     routeOnline(engine.state);
   });
   G.channel.onOpen(() => {
