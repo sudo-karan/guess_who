@@ -116,11 +116,16 @@ export function createReliableChannel(inner, {
     }
   }
 
+  // The peer has told us exactly what it is missing, which is both newer and
+  // better information than our own resend clock: it proves they are listening.
+  // So this always sends, and resets the clock rather than counting against it.
+  // Refusing once our own budget had run out meant a gap that was perfectly
+  // recoverable stayed open for good. Giving up is the asking side's job, and
+  // askGap below does it.
   function resendFrom(seq) {
     for (const [n, item] of [...outbox].sort((a, b) => a[0] - b[0])) {
       if (n < seq) continue;
-      if (item.tries >= maxResends) continue;   // counts, so a hopeless gap surfaces
-      item.tries++;
+      item.tries = 0;
       item.sentAt = now();
       put(item.frame);
     }
@@ -267,8 +272,14 @@ export function createReliableChannel(inner, {
     // Put back what a page that went away had in flight. Resending is normally
     // the sender's job, but a tab that reloads takes its outbox with it, so the
     // one thing the machinery here cannot recover from is its own side vanishing.
-    // Those frames have to come back from the saved game instead. Repeats are
-    // safe: the engine ignores a hand-over it has already applied.
+    // Those frames have to come back from the saved game instead.
+    //
+    // A repeat is harmless for the messages that decide anything: the engine
+    // ignores a hand-over, a setup, a start of play, a guess or a result it has
+    // already applied. The rest (a chat line, a question and its answer) have no
+    // such guard, so a replay can show one of those twice. Worth knowing rather
+    // than worth a dedupe key, since the alternative is losing the move that
+    // freezes the match.
     requeue(msgs) {
       if (!Array.isArray(msgs)) return;
       for (const m of msgs) if (m && typeof m === 'object') sendApp(m);

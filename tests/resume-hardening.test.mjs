@@ -476,6 +476,65 @@ test('delivery: a gap that can never be filled is reported, not asked for foreve
   A.close();
 });
 
+test('resume: a second drop is still reported after the first one was recovered', async () => {
+  // net.js latches its error reporting so a late timer cannot overwrite a more
+  // accurate terminal message. A resume revives the transport, so it has to
+  // lift that latch too: without it the SECOND drop said nothing at all, and
+  // nothing put the relay back up for an opponent who needed it to get home.
+  const broker = createFakeBroker();
+  const host = createOnlineChannel({ makePeer: broker.makePeer, peerQuietMs: 50 });
+  let code = null, token = null, resumed = false;
+  const errs = [];
+  host.onJoinRequest((who, ctl) => ctl.accept());
+  host.onToken((t) => { token = t; });
+  host.onResumed(() => { resumed = true; });
+  host.onError((e) => errs.push(e.type));
+  host.host((c) => { code = c; });
+  await until(() => code !== null);
+
+  const g1 = createOnlineChannel({ makePeer: broker.makePeer });
+  g1.join(code, 'Bo');
+  await until(() => token !== null);
+  g1.close();
+  await until(() => errs.length >= 1, 4000);
+  assert.deepEqual(errs, ['closed'], 'the first drop is reported');
+
+  const g2 = createOnlineChannel({ makePeer: broker.makePeer });
+  g2.join(code, 'Bo', token, 1);
+  await until(() => resumed, 8000);
+  assert.ok(resumed);
+
+  g2.close();
+  await until(() => errs.length >= 2, 4000);
+  assert.deepEqual(errs, ['closed', 'closed'], 'and so is the second');
+  host.close(); g1.close(); g2.close();
+});
+
+test('delivery: a request for a missing message is answered even after our resends gave up', async () => {
+  // An explicit request is newer and better information than our own clock: it
+  // proves the peer is listening and says exactly what it wants. Refusing it
+  // once our budget had run out left a perfectly recoverable gap open for good.
+  const ends = wiredPair();
+  const A = createReliableChannel(ends.a, { resendMs: 40, maxResends: 2, ackIdleMs: 500 });
+  A.onError(() => {});
+  const sent = [];
+  const realSend = ends.a.send;
+  ends.a.send = (m) => { sent.push(m); realSend(m); };
+  const handovers = () => sent.filter((m) => m && m.type === 'endTurn').length;
+
+  A.send({ type: 'endTurn', turn: 2 });
+  await until(() => handovers() >= 3, 4000);     // the first send plus two resends
+  await flush(900);
+  const plateau = handovers();
+  await flush(700);
+  assert.equal(handovers(), plateau, 'our own clock has given up, as it should');
+
+  ends.a.deliver({ __need: 1 });                 // the peer says what it is missing
+  await until(() => handovers() > plateau, 3000);
+  assert.ok(handovers() > plateau, 'and asking for it gets it');
+  A.close();
+});
+
 /* -------------------- an engine that ignores a repeat ------------------ */
 
 function guestInPlay() {
@@ -502,6 +561,30 @@ test('engine: a repeated setup does not wipe the cards you have crossed off', ()
   e.handleMessage({ type: 'setup', name: 'Ann', board });
   assert.equal(crossedOff(e), 3, 'the deductions survive');
   assert.equal(e.state.phase, 'play');
+});
+
+test('engine: a guess only decides a game that is actually being played', () => {
+  // A rematch moves the phase off 'over' while the end-of-game messages may
+  // still be unconfirmed, so a resume just after clicking Rematch replayed the
+  // previous game's guess and dropped the receiver onto a result for a round
+  // nobody had played.
+  const idle = createEngine({ isHost: false, myName: 'Bo' });
+  idle.handleMessage({ type: 'guess', id: 3, ts: 1, turn: 1 });
+  assert.equal(idle.state.phase, 'setup', 'a guess before a game starts decides nothing');
+  assert.equal(idle.state.winner, null);
+
+  const playing = guestInPlay();
+  const wrong = playing.state.oppBoard.find((id) => id !== playing.state.mySecret);
+  playing.handleMessage({ type: 'guess', id: wrong, ts: 2, turn: 1 });
+  assert.equal(playing.state.phase, 'over', 'but one during play still does');
+});
+
+test('engine: a result for a guess I never made is ignored', () => {
+  const e = guestInPlay();
+  assert.equal(e.state.pendingGuess, false);
+  e.handleMessage({ type: 'guessResult', id: 5, correct: true, ts: 1 });
+  assert.equal(e.state.phase, 'play', 'it does not win a round I did not guess in');
+  assert.equal(e.state.winner, null);
 });
 
 test('engine: a repeated begin does not hand the turn back mid-game', () => {
